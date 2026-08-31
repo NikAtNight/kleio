@@ -44,6 +44,16 @@ final class SystemAudioTap {
     private(set) var fileURL: URL?
 
     func start(writingTo url: URL, onLevel: @escaping @Sendable (Float) -> Void) throws {
+        try start(writingTo: Optional(url), onLevel: onLevel)
+    }
+
+    /// Starts the Core Audio tap for level confirmation only. No file is
+    /// created and no audio buffers are retained.
+    func startMetering(onLevel: @escaping @Sendable (Float) -> Void) throws {
+        try start(writingTo: nil, onLevel: onLevel)
+    }
+
+    private func start(writingTo url: URL?, onLevel: @escaping @Sendable (Float) -> Void) throws {
         fileURL = url
 
         // Exclude our own process from the global tap.
@@ -105,12 +115,14 @@ final class SystemAudioTap {
         // The tap delivers interleaved float32; AVAudioFile's default
         // processing format is de-interleaved, and ExtAudioFileWrite errors
         // (-50) on the mismatch — declare interleaved explicitly.
-        audioFile = try AVAudioFile(
-            forWriting: url,
-            settings: tapFormat.settings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: tapFormat.isInterleaved
-        )
+        if let url {
+            audioFile = try AVAudioFile(
+                forWriting: url,
+                settings: tapFormat.settings,
+                commonFormat: .pcmFormatFloat32,
+                interleaved: tapFormat.isInterleaved
+            )
+        }
 
         let pausedFlag = paused
         var levelCounter = 0
@@ -122,7 +134,7 @@ final class SystemAudioTap {
                 let sizes = abl.map { "\($0.mDataByteSize)B/\($0.mNumberChannels)ch" }.joined(separator: ", ")
                 self.firstBufferDescription = "buffers: \(abl.count) [\(sizes)]"
             }
-            guard let format = self.format, let file = self.audioFile else { return }
+            guard let format = self.format else { return }
             guard !pausedFlag.value else { return }
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inInputData, deallocator: nil) else {
                 self.conversionFailures.increment()
@@ -138,13 +150,15 @@ final class SystemAudioTap {
                 self.firstBufferDescription += " frameLength=\(buffer.frameLength) capacity=\(buffer.frameCapacity)"
             }
             guard buffer.frameLength > 0 else { return }
-            do {
-                try file.write(from: buffer)
-                self.writesOK.increment()
-            } catch {
-                if self.firstWriteError.isEmpty {
-                    self.firstWriteError = "\(error)"
-                    DiagLog.log("system audio tap write failed: %@", error.localizedDescription)
+            if let file = self.audioFile {
+                do {
+                    try file.write(from: buffer)
+                    self.writesOK.increment()
+                } catch {
+                    if self.firstWriteError.isEmpty {
+                        self.firstWriteError = "\(error)"
+                        DiagLog.log("system audio tap write failed: %@", error.localizedDescription)
+                    }
                 }
             }
             // Level metering ~10x/sec is plenty; buffers arrive ~100x/sec.

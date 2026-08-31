@@ -82,6 +82,10 @@ struct ScribeDocument: Codable, Identifiable, Hashable {
     /// queue finishes. Values are `ExportFormat.rawValue` strings.
     var automaticExportDirectory: String?
     var automaticExportFormats: [String]?
+    /// Calendar metadata retained only for an auto-recording. Optional so
+    /// documents written by older Scribe builds continue to decode.
+    var calendarEventID: String?
+    var calendarEventTitle: String?
 
     var fullText: String {
         segments.map(\.text).joined(separator: " ")
@@ -90,6 +94,8 @@ struct ScribeDocument: Codable, Identifiable, Hashable {
     var isMeetingRecording: Bool {
         tracks.contains { $0.source == .microphone } && tracks.contains { $0.source == .system }
     }
+
+    var isAutoRecording: Bool { calendarEventID != nil }
 
     func speakerName(for segment: TranscriptSegment) -> String {
         if let speaker = segment.speaker?.trimmingCharacters(in: .whitespacesAndNewlines),

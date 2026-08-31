@@ -8,6 +8,7 @@ struct Meeting: Identifiable, Equatable {
     let title: String
     let start: Date
     let end: Date
+    let calendarIdentifier: String
     let calendarTitle: String
     let calendarColor: NSColor
     let joinURL: URL?
@@ -20,6 +21,7 @@ struct Meeting: Identifiable, Equatable {
         lhs.title == rhs.title &&
         lhs.start == rhs.start &&
         lhs.end == rhs.end &&
+        lhs.calendarIdentifier == rhs.calendarIdentifier &&
         lhs.calendarTitle == rhs.calendarTitle &&
         lhs.calendarColor.isEqual(rhs.calendarColor) &&
         lhs.joinURL == rhs.joinURL &&
@@ -62,14 +64,24 @@ final class CalendarSync: NSObject, ObservableObject {
     static let leadMinutesKey = "calendarLeadMinutes"
     static let selectedIDsKey = "calendarSelectedIDs"
     static let onlyWithLinksKey = "calendarOnlyWithLinks"
+    static let autoRecordEnabledKey = "autoRecordEnabled"
+    static let autoRecordCalendarIDsKey = "autoRecordCalendarIDs"
+    static let autoRecordLateJoinMinutesKey = "autoRecordLateJoinMinutes"
+    static let autoRecordGraceMinutesKey = "autoRecordGraceMinutes"
+    static let autoRecordSilenceMinutesKey = "autoRecordSilenceMinutes"
+    static let autoRecordEventOverridesKey = "autoRecordEventOverrides"
+    static let autoRecordConsentShownKey = "autoRecordConsentShown"
+    static let autoRecordStoreEventDetailsKey = "autoRecordStoreEventDetails"
 
     @Published private(set) var authorizationStatus: EKAuthorizationStatus
     @Published private(set) var availableCalendars: [EKCalendar] = []
     @Published private(set) var upcomingMeetings: [Meeting] = []
+    @Published private(set) var autoRecordProblem: String?
 
     private let eventStore = EKEventStore()
     private let defaults: UserDefaults
     private var refreshTimer: Timer?
+    private var fetchedMeetings: [Meeting] = []
 
     var isEnabled: Bool {
         get { defaults.bool(forKey: Self.syncEnabledKey) }
@@ -111,6 +123,62 @@ final class CalendarSync: NSObject, ObservableObject {
         }
     }
 
+    var autoRecordEnabled: Bool {
+        get { defaults.bool(forKey: Self.autoRecordEnabledKey) }
+        set {
+            defaults.set(newValue, forKey: Self.autoRecordEnabledKey)
+            if newValue { autoRecordProblem = nil }
+            if newValue {
+                Task { await enableAndRefresh() }
+            } else {
+                refresh()
+            }
+        }
+    }
+
+    var autoRecordCalendarIDs: [String] {
+        get { defaults.stringArray(forKey: Self.autoRecordCalendarIDsKey) ?? [] }
+        set {
+            defaults.set(newValue, forKey: Self.autoRecordCalendarIDsKey)
+            refresh()
+        }
+    }
+
+    var autoRecordLateJoinMinutes: Int {
+        get { defaults.object(forKey: Self.autoRecordLateJoinMinutesKey) as? Int ?? 15 }
+        set { defaults.set(newValue, forKey: Self.autoRecordLateJoinMinutesKey) }
+    }
+
+    var autoRecordGraceMinutes: Int {
+        get { defaults.object(forKey: Self.autoRecordGraceMinutesKey) as? Int ?? 5 }
+        set { defaults.set(newValue, forKey: Self.autoRecordGraceMinutesKey) }
+    }
+
+    var autoRecordSilenceMinutes: Int {
+        get { defaults.object(forKey: Self.autoRecordSilenceMinutesKey) as? Int ?? 3 }
+        set { defaults.set(newValue, forKey: Self.autoRecordSilenceMinutesKey) }
+    }
+
+    var hasShownAutoRecordConsent: Bool {
+        get { defaults.bool(forKey: Self.autoRecordConsentShownKey) }
+        set { defaults.set(newValue, forKey: Self.autoRecordConsentShownKey) }
+    }
+
+    var storesAutoRecordEventDetails: Bool {
+        get { defaults.object(forKey: Self.autoRecordStoreEventDetailsKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Self.autoRecordStoreEventDetailsKey) }
+    }
+
+    var autoRecordConfiguration: AutoRecordConfiguration {
+        AutoRecordConfiguration(
+            enabled: isEnabled && autoRecordEnabled && authorizationStatus == .fullAccess,
+            leadMinutes: leadMinutes,
+            lateJoinMinutes: autoRecordLateJoinMinutes,
+            graceMinutes: autoRecordGraceMinutes,
+            silenceMinutes: autoRecordSilenceMinutes
+        )
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         authorizationStatus = EKEventStore.authorizationStatus(for: .event)
@@ -137,6 +205,7 @@ final class CalendarSync: NSObject, ObservableObject {
         authorizationStatus = EKEventStore.authorizationStatus(for: .event)
         guard isEnabled, authorizationStatus == .fullAccess else {
             upcomingMeetings = []
+            fetchedMeetings = []
             return
         }
 
@@ -144,14 +213,64 @@ final class CalendarSync: NSObject, ObservableObject {
             $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
         let enabledIDs = Set(selectedCalendarIDs)
-        let calendars = enabledIDs.isEmpty ? availableCalendars : availableCalendars.filter { enabledIDs.contains($0.calendarIdentifier) }
+        let autoIDs = Set(autoRecordCalendarIDs)
+        let displayedCalendars = enabledIDs.isEmpty ? availableCalendars : availableCalendars.filter { enabledIDs.contains($0.calendarIdentifier) }
+        let fetchedCalendarIDs = Set(displayedCalendars.map(\.calendarIdentifier)).union(autoIDs)
+        let calendars = availableCalendars.filter { fetchedCalendarIDs.contains($0.calendarIdentifier) }
         let now = Date()
-        let predicate = eventStore.predicateForEvents(withStart: now, end: now.addingTimeInterval(7 * 24 * 60 * 60), calendars: calendars)
-        upcomingMeetings = eventStore.events(matching: predicate)
+        let predicate = eventStore.predicateForEvents(
+            withStart: now.addingTimeInterval(-TimeInterval(autoRecordLateJoinMinutes * 60)),
+            end: now.addingTimeInterval(7 * 24 * 60 * 60),
+            calendars: calendars
+        )
+        fetchedMeetings = eventStore.events(matching: predicate)
             .filter { !$0.isAllDay && !isDeclined($0) && $0.status != .canceled }
             .compactMap(makeMeeting)
             .sorted { $0.start < $1.start }
+        let displayedCalendarIDs = Set(displayedCalendars.map(\.calendarIdentifier))
+        upcomingMeetings = fetchedMeetings.filter { meeting in
+            meeting.end >= now && displayedCalendarIDs.contains(meeting.calendarIdentifier)
+        }
         scheduleNotifications(now: now)
+    }
+
+    func autoRecordMeetings(at now: Date) -> [AutoRecordEvent] {
+        guard autoRecordEnabled else { return [] }
+        let enabledCalendarIDs = Set(autoRecordCalendarIDs)
+        return fetchedMeetings.compactMap { meeting in
+            let override = autoRecordOverride(for: meeting.eventID)
+            guard override ?? enabledCalendarIDs.contains(meeting.calendarIdentifier) else { return nil }
+            let armDate = meeting.start.addingTimeInterval(-TimeInterval(leadMinutes * 60))
+            let expiry = meeting.start.addingTimeInterval(TimeInterval(autoRecordLateJoinMinutes * 60))
+            guard now >= armDate && now <= expiry else { return nil }
+            return AutoRecordEvent(
+                eventID: meeting.eventID,
+                title: meeting.title,
+                start: meeting.start,
+                end: meeting.end,
+                joinURL: meeting.joinURL
+            )
+        }
+    }
+
+    func autoRecordOverride(for eventID: String) -> Bool? {
+        guard let value = defaults.dictionary(forKey: Self.autoRecordEventOverridesKey)?[eventID] else { return nil }
+        return (value as? NSNumber)?.boolValue
+    }
+
+    func setAutoRecordOverride(_ value: Bool?, for eventID: String) {
+        var overrides = defaults.dictionary(forKey: Self.autoRecordEventOverridesKey) ?? [:]
+        overrides[eventID] = value
+        defaults.set(overrides, forKey: Self.autoRecordEventOverridesKey)
+    }
+
+    func autoRecordIsEnabled(for meeting: Meeting) -> Bool {
+        autoRecordOverride(for: meeting.eventID) ?? autoRecordCalendarIDs.contains(meeting.calendarIdentifier)
+    }
+
+    func suspendAutoRecord(with problem: String) {
+        autoRecordProblem = problem
+        defaults.set(false, forKey: Self.autoRecordEnabledKey)
     }
 
     func handleNotificationAction(identifier: String, userInfo: [AnyHashable: Any]) {
@@ -191,6 +310,7 @@ final class CalendarSync: NSObject, ObservableObject {
             title: event.title?.isEmpty == false ? event.title! : "Untitled event",
             start: event.startDate,
             end: event.endDate,
+            calendarIdentifier: event.calendar.calendarIdentifier,
             calendarTitle: event.calendar.title,
             calendarColor: color,
             joinURL: joinURL,

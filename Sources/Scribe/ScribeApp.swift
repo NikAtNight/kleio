@@ -105,6 +105,7 @@ struct ScribeApp: App {
     @StateObject private var watchFolders = WatchFolderManager()
     @StateObject private var dictation = DictationController()
     @StateObject private var calendarSync = CalendarSync()
+    @StateObject private var autoRecordArbiter = AutoRecordArbiter()
 
     var body: some Scene {
         WindowGroup("Scribe", id: "main") {
@@ -135,7 +136,14 @@ struct ScribeApp: App {
                         if let first = ids.first { appState.selection = first }
                     }
                     appDelegate.calendarSync = calendarSync
+                    appDelegate.autoRecordArbiter = autoRecordArbiter
                     calendarSync.start()
+                    autoRecordArbiter.configure(
+                        calendarSync: calendarSync,
+                        recording: recording,
+                        library: library,
+                        queue: queue
+                    )
                 }
                 .frame(minWidth: 940, minHeight: 560)
         }
@@ -184,6 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// files import exactly once no matter how many windows exist.
     var onOpenFiles: (([URL]) -> Void)?
     weak var calendarSync: CalendarSync?
+    weak var autoRecordArbiter: AutoRecordArbiter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -192,9 +201,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let center = UNUserNotificationCenter.current()
             let join = UNNotificationAction(identifier: "MEETING_JOIN", title: "Join", options: [.foreground])
             let openScribe = UNNotificationAction(identifier: "MEETING_OPEN_SCRIBE", title: "Open Scribe", options: [.foreground])
+            let cancelAutoRecord = UNNotificationAction(
+                identifier: AutoRecordArbiter.cancelActionIdentifier,
+                title: "Cancel",
+                options: []
+            )
+            let startAutoRecord = UNNotificationAction(
+                identifier: AutoRecordArbiter.startNowActionIdentifier,
+                title: "Start Now",
+                options: [.foreground]
+            )
+            let stopAndSwitch = UNNotificationAction(
+                identifier: AutoRecordArbiter.stopAndSwitchActionIdentifier,
+                title: "Stop and Switch",
+                options: [.foreground]
+            )
+            let keepCurrent = UNNotificationAction(
+                identifier: AutoRecordArbiter.keepCurrentActionIdentifier,
+                title: "Keep Current",
+                options: []
+            )
             center.setNotificationCategories([UNNotificationCategory(
                 identifier: "MEETING_START",
                 actions: [join, openScribe],
+                intentIdentifiers: []
+            ), UNNotificationCategory(
+                identifier: AutoRecordArbiter.countdownCategoryIdentifier,
+                actions: [cancelAutoRecord, startAutoRecord],
+                intentIdentifiers: []
+            ), UNNotificationCategory(
+                identifier: AutoRecordArbiter.overlapCategoryIdentifier,
+                actions: [stopAndSwitch, keepCurrent],
                 intentIdentifiers: []
             )])
             center.delegate = self
@@ -211,7 +248,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        if response.actionIdentifier == "MEETING_JOIN" {
+        if response.actionIdentifier == AutoRecordArbiter.cancelActionIdentifier ||
+            response.actionIdentifier == AutoRecordArbiter.startNowActionIdentifier ||
+            response.actionIdentifier == AutoRecordArbiter.stopAndSwitchActionIdentifier ||
+            response.actionIdentifier == AutoRecordArbiter.keepCurrentActionIdentifier {
+            await MainActor.run {
+                autoRecordArbiter?.handleNotificationAction(
+                    identifier: response.actionIdentifier,
+                    userInfo: response.notification.request.content.userInfo
+                )
+            }
+        } else if response.actionIdentifier == "MEETING_JOIN" {
             await MainActor.run {
                 calendarSync?.handleNotificationAction(identifier: response.actionIdentifier, userInfo: response.notification.request.content.userInfo)
             }
