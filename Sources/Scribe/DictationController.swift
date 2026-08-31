@@ -1,0 +1,275 @@
+import AppKit
+import ApplicationServices
+import Carbon
+import Foundation
+import SwiftUI
+
+/// Local, system-wide press-to-toggle dictation. Option-Space starts capture;
+/// pressing it again transcribes with the selected Whisper model and pastes
+/// into the app that was active when dictation began.
+@MainActor
+final class DictationController: ObservableObject {
+    enum Phase: Equatable {
+        case idle
+        case preparing
+        case recording
+        case transcribing
+    }
+
+    @Published private(set) var phase: Phase = .idle
+    @Published private(set) var level: Float = 0
+    @Published private(set) var lastMessage: String?
+    @Published private(set) var enabled: Bool
+
+    private weak var modelManager: ModelManager?
+    private weak var replacements: ReplacementStore?
+    private weak var recordingSession: RecordingSession?
+    private var recorder: MicRecorder?
+    private var recordingURL: URL?
+    private var targetApplication: NSRunningApplication?
+    private let transcriber = Transcriber()
+    private lazy var hotKey = GlobalHotKey { [weak self] in
+        Task { @MainActor in self?.toggle() }
+    }
+
+    init() {
+        enabled = UserDefaults.standard.bool(forKey: "dictationEnabled")
+    }
+
+    var statusText: String {
+        switch phase {
+        case .idle: return lastMessage ?? "Ready — press ⌥Space"
+        case .preparing: return "Preparing microphone…"
+        case .recording: return "Listening — press ⌥Space to finish"
+        case .transcribing: return "Transcribing dictation…"
+        }
+    }
+
+    var isAccessibilityGranted: Bool { AXIsProcessTrusted() }
+
+    func configure(
+        modelManager: ModelManager,
+        replacements: ReplacementStore,
+        recordingSession: RecordingSession
+    ) {
+        self.modelManager = modelManager
+        self.replacements = replacements
+        self.recordingSession = recordingSession
+        if enabled && !hotKey.register() {
+            lastMessage = "Could not register ⌥Space. Another app may already use it."
+        }
+    }
+
+    func setEnabled(_ newValue: Bool, promptForAccessibility: Bool = false) {
+        enabled = newValue
+        UserDefaults.standard.set(newValue, forKey: "dictationEnabled")
+        if newValue {
+            if promptForAccessibility { requestAccessibility() }
+            if !hotKey.register() {
+                lastMessage = "Could not register ⌥Space. Another app may already use it."
+            } else {
+                lastMessage = isAccessibilityGranted
+                    ? "Dictation enabled"
+                    : "Dictation enabled; results will copy until Accessibility is allowed"
+            }
+        } else {
+            if phase == .recording { cancelRecording() }
+            hotKey.unregister()
+            lastMessage = nil
+        }
+    }
+
+    func requestAccessibility() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    }
+
+    func openAccessibilitySettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }
+
+    func toggle() {
+        guard enabled else { return }
+        switch phase {
+        case .idle:
+            startRecording()
+        case .recording:
+            finishRecording()
+        case .preparing, .transcribing:
+            break
+        }
+    }
+
+    func cancelRecording() {
+        recorder?.stop()
+        recorder = nil
+        if let recordingURL { try? FileManager.default.removeItem(at: recordingURL) }
+        recordingURL = nil
+        targetApplication = nil
+        level = 0
+        phase = .idle
+        lastMessage = "Dictation cancelled"
+    }
+
+    private func startRecording() {
+        guard recordingSession?.isRecording != true else {
+            lastMessage = "Finish the active recording before starting dictation"
+            return
+        }
+        phase = .preparing
+        lastMessage = nil
+        targetApplication = NSWorkspace.shared.frontmostApplication
+        Task {
+            guard await MicRecorder.requestPermission() else {
+                phase = .idle
+                lastMessage = MicRecorder.MicError.permissionDenied.localizedDescription
+                return
+            }
+            do {
+                let directory = ModelManager.downloadBase.appendingPathComponent("Dictation", isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let url = directory.appendingPathComponent("dictation-\(UUID().uuidString).caf")
+                let recorder = MicRecorder()
+                try recorder.start(writingTo: url) { [weak self] level in
+                    Task { @MainActor in self?.level = level }
+                }
+                self.recorder = recorder
+                recordingURL = url
+                phase = .recording
+            } catch {
+                phase = .idle
+                lastMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func finishRecording() {
+        guard let url = recordingURL, let modelManager else { return }
+        recorder?.stop()
+        recorder = nil
+        level = 0
+        phase = .transcribing
+
+        let model = modelManager.selectedVariant
+        let language = UserDefaults.standard.string(forKey: "language")
+        Task {
+            defer {
+                try? FileManager.default.removeItem(at: url)
+                recordingURL = nil
+            }
+            do {
+                try await transcriber.load(model: model)
+                let segments = try await transcriber.transcribe(
+                    file: url,
+                    source: .microphone,
+                    language: language?.isEmpty == false ? language : nil,
+                    translate: false
+                )
+                var text = segments.map(\.text).joined(separator: " ")
+                if let replacements { text = replacements.apply(to: text) }
+                guard !text.isEmpty else {
+                    phase = .idle
+                    lastMessage = "No speech detected"
+                    return
+                }
+                deliver(text)
+            } catch {
+                phase = .idle
+                lastMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func deliver(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+
+        guard AXIsProcessTrusted() else {
+            phase = .idle
+            lastMessage = "Copied to clipboard — allow Accessibility to paste automatically"
+            return
+        }
+
+        targetApplication?.activate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            let source = CGEventSource(stateID: .hidSystemState)
+            let key = CGKeyCode(kVK_ANSI_V)
+            let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)
+            down?.flags = .maskCommand
+            let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
+            up?.flags = .maskCommand
+            down?.post(tap: .cghidEventTap)
+            up?.post(tap: .cghidEventTap)
+            Task { @MainActor in
+                self?.phase = .idle
+                self?.lastMessage = "Dictation inserted"
+                self?.targetApplication = nil
+            }
+        }
+    }
+}
+
+/// Carbon hot keys remain the least intrusive way to reserve a global key
+/// combination: unlike a global key monitor they don't require Input
+/// Monitoring and they consume only the registered shortcut.
+private final class GlobalHotKey {
+    private let action: () -> Void
+    private var hotKeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+
+    init(action: @escaping () -> Void) {
+        self.action = action
+    }
+
+    @discardableResult
+    func register() -> Bool {
+        if hotKeyRef != nil { return true }
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let pointer = Unmanaged.passUnretained(self).toOpaque()
+        let handlerStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, _, userData in
+                guard let userData else { return OSStatus(eventNotHandledErr) }
+                let monitor = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
+                DispatchQueue.main.async { monitor.action() }
+                return noErr
+            },
+            1,
+            &eventType,
+            pointer,
+            &handlerRef
+        )
+        guard handlerStatus == noErr else { return false }
+
+        let identifier = EventHotKeyID(signature: 0x53435242, id: 1) // SCRB
+        let status = RegisterEventHotKey(
+            UInt32(kVK_Space),
+            UInt32(optionKey),
+            identifier,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+        if status != noErr {
+            if let handlerRef { RemoveEventHandler(handlerRef) }
+            handlerRef = nil
+            return false
+        }
+        return true
+    }
+
+    func unregister() {
+        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+        if let handlerRef { RemoveEventHandler(handlerRef) }
+        hotKeyRef = nil
+        handlerRef = nil
+    }
+
+    deinit {
+        unregister()
+    }
+}
