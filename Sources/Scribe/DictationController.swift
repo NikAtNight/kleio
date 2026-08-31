@@ -182,29 +182,23 @@ final class DictationController: ObservableObject {
     }
 
     private func deliver(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-
         guard AXIsProcessTrusted() else {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
             phase = .idle
             lastMessage = "Copied to clipboard — allow Accessibility to paste automatically"
             return
         }
 
         targetApplication?.activate()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            let source = CGEventSource(stateID: .hidSystemState)
-            let key = CGKeyCode(kVK_ANSI_V)
-            let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)
-            down?.flags = .maskCommand
-            let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
-            up?.flags = .maskCommand
-            down?.post(tap: .cghidEventTap)
-            up?.post(tap: .cghidEventTap)
-            Task { @MainActor in
-                self?.phase = .idle
-                self?.lastMessage = "Dictation inserted"
-                self?.targetApplication = nil
+        // Give the target app a beat to regain key focus before the synthetic
+        // ⌘V lands, otherwise the paste can hit the wrong app.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            TextInjector.inject(text) { [weak self] landed in
+                guard let self else { return }
+                phase = .idle
+                lastMessage = landed ? "Dictation inserted" : "Could not paste dictation"
+                targetApplication = nil
             }
         }
     }
