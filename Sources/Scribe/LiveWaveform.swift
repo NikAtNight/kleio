@@ -12,26 +12,49 @@ struct LiveWaveformLane {
     }
 }
 
-/// A compact recording history that keeps the newest sample anchored to the right edge.
+/// A live scrolling waveform, newest audio at the right edge.
+///
+/// Renders inside `TimelineView(.animation)` and slides bars left on the
+/// display clock: one bar per fixed-rate sample, with a fractional offset
+/// interpolated from `lastAppend`, so motion stays smooth no matter how
+/// irregularly the audio callbacks arrive.
 struct LiveWaveformView: View {
     let lanes: [LiveWaveformLane]
     let isPaused: Bool
+    /// When the newest sample landed (drives the interpolated scroll phase).
+    var lastAppend: Date = .distantPast
+    /// Seconds between samples in each lane's history.
+    var sampleInterval: TimeInterval = RecordingSession.waveformSampleInterval
 
     var body: some View {
-        VStack(spacing: lanes.count > 1 ? 12 : 0) {
-            ForEach(Array(lanes.enumerated()), id: \.offset) { _, lane in
-                WaveformLaneView(lane: lane)
-                    .frame(height: lanes.count > 1 ? 64 : 96)
+        TimelineView(.animation(minimumInterval: nil, paused: isPaused)) { timeline in
+            let phase = scrollPhase(at: timeline.date)
+            VStack(spacing: lanes.count > 1 ? 12 : 0) {
+                ForEach(Array(lanes.enumerated()), id: \.offset) { _, lane in
+                    WaveformLaneView(lane: lane, phase: phase)
+                        .frame(height: lanes.count > 1 ? 64 : 96)
+                }
             }
         }
         .opacity(isPaused ? 0.5 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Live audio waveform")
     }
+
+    /// 0 when a sample just landed, approaching 1 as the next one is due.
+    private func scrollPhase(at now: Date) -> CGFloat {
+        guard lastAppend != .distantPast, sampleInterval > 0 else { return 1 }
+        let age = now.timeIntervalSince(lastAppend)
+        return CGFloat(min(max(age / sampleInterval, 0), 1))
+    }
 }
 
 private struct WaveformLaneView: View {
     let lane: LiveWaveformLane
+    let phase: CGFloat
+
+    private static let barWidth: CGFloat = 3
+    private static let barStride: CGFloat = 5
 
     var body: some View {
         Canvas { context, size in
@@ -39,21 +62,25 @@ private struct WaveformLaneView: View {
             let centerLine = Path(CGRect(x: 0, y: centerY, width: size.width, height: 1))
             context.fill(centerLine, with: .color(lane.color.opacity(0.14)))
 
-            let samples = samplesForWidth(size.width)
-            guard !samples.isEmpty else { return }
-
-            let barWidth: CGFloat = 3
-            let barGap: CGFloat = 2
-            let stride = barWidth + barGap
-            let startX = size.width - barWidth - CGFloat(samples.count - 1) * stride
+            guard !lane.history.isEmpty else { return }
+            let stride = Self.barStride
             let maximumHeight = max(2, size.height - 12)
+            let visibleBars = min(lane.history.count, Int(size.width / stride) + 2)
+            let newest = lane.history.count - 1
 
-            for (index, sample) in samples.enumerated() {
+            // Bar age in samples is (index from newest + phase); each bar's
+            // right edge slides left continuously as phase advances, and the
+            // newest bar enters from beyond the right edge. Canvas clips.
+            for j in 0..<visibleBars {
+                let sample = lane.history[newest - j]
+                let rightEdge = size.width + stride - (CGFloat(j) + phase) * stride
+                let x = rightEdge - Self.barWidth
+                if rightEdge <= 0 { break }
                 let height = max(2, CGFloat(sample) * maximumHeight)
                 let rect = CGRect(
-                    x: startX + CGFloat(index) * stride,
+                    x: x,
                     y: centerY - height / 2,
-                    width: barWidth,
+                    width: Self.barWidth,
                     height: height
                 )
                 context.fill(
@@ -62,6 +89,7 @@ private struct WaveformLaneView: View {
                 )
             }
         }
+        .clipped()
         .overlay(alignment: .leading) {
             Text(lane.label)
                 .font(.caption2)
@@ -72,23 +100,6 @@ private struct WaveformLaneView: View {
                 .padding(.leading, 4)
         }
         .accessibilityLabel(lane.label)
-    }
-
-    /// The recorder retains 45 seconds for this view, then condenses it into
-    /// the number of bars the window can actually show.
-    private func samplesForWidth(_ width: CGFloat) -> [Float] {
-        let sampleRate: CGFloat = 20
-        let historyWindow = Int(sampleRate * 45)
-        let recentHistory = Array(lane.history.suffix(historyWindow))
-        let barCount = min(recentHistory.count, max(1, Int(width / 5)))
-        guard barCount > 0 else { return [] }
-        guard barCount < recentHistory.count else { return recentHistory }
-
-        return (0..<barCount).map { barIndex in
-            let start = barIndex * recentHistory.count / barCount
-            let end = max(start + 1, (barIndex + 1) * recentHistory.count / barCount)
-            return recentHistory[start..<end].max() ?? 0
-        }
     }
 }
 
@@ -106,13 +117,15 @@ private struct WaveformLaneView: View {
 
 private struct LiveWaveformPreview: View {
     let laneCount: Int
+    @State private var start = Date()
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 20)) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
             LiveWaveformView(
                 lanes: previewLanes(at: now),
-                isPaused: false
+                isPaused: false,
+                lastAppend: timeline.date
             )
         }
     }

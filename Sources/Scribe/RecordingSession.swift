@@ -102,13 +102,23 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var activeCalendarEventTitle: String?
     @Published var lastError: String?
 
+    /// When the newest waveform sample landed; the live waveform interpolates
+    /// its scroll position from this. Not published: it always changes in the
+    /// same tick as the published history arrays.
+    private(set) var lastWaveformAppend = Date.distantPast
+
+    /// The waveform is sampled on a fixed clock, not on recorder callbacks —
+    /// callbacks arrive at ~10 Hz with jitter, which made the waveform stutter.
+    static let waveformSampleInterval: TimeInterval = 0.05
+
     private var mic: MicRecorder?
     private var tap: SystemAudioTap?
     private var timer: Timer?
     private var segmentStart: Date?
     private var accumulated: TimeInterval = 0
-    private var micLevelHistory = LevelHistory()
-    private var systemLevelHistory = LevelHistory()
+    private var sampleCount = 0
+    private var micLevelHistory = LevelHistory(minimumInterval: 0)
+    private var systemLevelHistory = LevelHistory(minimumInterval: 0)
 
     func start(
         mode: RecordingMode,
@@ -189,38 +199,39 @@ final class RecordingSession: ObservableObject {
         segmentStart = Date()
         elapsed = 0
         resetLevelHistories()
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: Self.waveformSampleInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
     }
 
+    /// Fixed 20 Hz clock: updates the elapsed readout and samples the current
+    /// levels into the waveform histories (sample-and-hold between recorder
+    /// callbacks), so bars advance on a steady beat the view can animate against.
     private func tick() {
         guard isRecording, !isPaused, let segmentStart else { return }
         elapsed = accumulated + Date().timeIntervalSince(segmentStart)
+
+        sampleCount += 1
+        let time = Double(sampleCount) * Self.waveformSampleInterval
+        if mic != nil, micLevelHistory.append(micLevel, at: time) {
+            micHistory = micLevelHistory.samples
+        }
+        if tap != nil, systemLevelHistory.append(systemLevel, at: time) {
+            systemHistory = systemLevelHistory.samples
+        }
+        lastWaveformAppend = Date()
     }
 
     private func receiveMicLevel(_ level: Float) {
         guard isRecording, !isPaused else { return }
         micLevel = level
-        append(level, to: &micLevelHistory, publishedHistory: \.micHistory)
     }
 
     private func receiveSystemLevel(_ level: Float) {
         guard isRecording, !isPaused else { return }
         systemLevel = level
-        append(level, to: &systemLevelHistory, publishedHistory: \.systemHistory)
-    }
-
-    private func append(
-        _ level: Float,
-        to history: inout LevelHistory,
-        publishedHistory: ReferenceWritableKeyPath<RecordingSession, [Float]>
-    ) {
-        if history.append(level, at: Date.timeIntervalSinceReferenceDate) {
-            self[keyPath: publishedHistory] = history.samples
-        }
     }
 
     private func resetLevelHistories() {
@@ -228,6 +239,8 @@ final class RecordingSession: ObservableObject {
         systemLevelHistory.reset()
         micHistory = []
         systemHistory = []
+        sampleCount = 0
+        lastWaveformAppend = .distantPast
     }
 
     func togglePause() {

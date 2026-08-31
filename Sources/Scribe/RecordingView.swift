@@ -44,8 +44,12 @@ struct ActiveRecordingView: View {
         VStack(spacing: 0) {
             Spacer(minLength: 24)
 
-            LiveWaveformView(lanes: waveformLanes, isPaused: recording.isPaused)
-                .padding(.horizontal, 24)
+            LiveWaveformView(
+                lanes: waveformLanes,
+                isPaused: recording.isPaused,
+                lastAppend: recording.lastWaveformAppend
+            )
+            .padding(.horizontal, 24)
 
             Spacer(minLength: 22)
 
