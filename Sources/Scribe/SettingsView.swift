@@ -25,6 +25,16 @@ struct SettingsView: View {
 struct DictationSettings: View {
     @EnvironmentObject private var dictation: DictationController
     @State private var accessibilityGranted = false
+    @AppStorage("dictationCleanupEnabled") private var cleanupEnabled = false
+    @AppStorage("dictationCleanupBackend") private var cleanupBackend = TranscriptCleaner.preferredBackend.rawValue
+    @AppStorage("dictationCleanupOllamaModel") private var ollamaModel = TranscriptCleaner.defaultOllamaModel
+    @State private var ollamaModels: [String] = []
+
+    private var selectedCleanupBackend: TranscriptCleaner.Backend {
+        TranscriptCleaner.selectedBackend(
+            preference: TranscriptCleaner.Backend(rawValue: cleanupBackend) ?? .ollama
+        )
+    }
 
     var body: some View {
         Form {
@@ -62,6 +72,36 @@ struct DictationSettings: View {
 
             LabeledContent("Status:", value: dictation.statusText)
 
+            Toggle("Clean up dictation with a local model", isOn: $cleanupEnabled)
+
+            if cleanupEnabled {
+                Picker("Backend:", selection: $cleanupBackend) {
+                    if AppleIntelligenceCleaner.isAvailable {
+                        Text(TranscriptCleaner.Backend.appleIntelligence.displayName)
+                            .tag(TranscriptCleaner.Backend.appleIntelligence.rawValue)
+                    }
+                    Text(TranscriptCleaner.Backend.ollama.displayName)
+                        .tag(TranscriptCleaner.Backend.ollama.rawValue)
+                }
+
+                if selectedCleanupBackend == .ollama {
+                    if !ollamaModels.isEmpty {
+                        Picker("Ollama model:", selection: $ollamaModel) {
+                            Text("Choose a model").tag("")
+                            ForEach(ollamaModels, id: \.self) { installedModel in
+                                Text(installedModel).tag(installedModel)
+                            }
+                        }
+                    } else {
+                        TextField("Ollama model:", text: $ollamaModel)
+                    }
+                }
+
+                Text("Runs entirely on this Mac. scripts/setup-s1-mini.sh registers the recommended model.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if dictation.phase == .recording {
                 LevelMeter(label: "Microphone", icon: "mic.fill", level: dictation.level)
                 HStack {
@@ -87,6 +127,18 @@ struct DictationSettings: View {
         .onAppear { accessibilityGranted = dictation.isAccessibilityGranted }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             accessibilityGranted = dictation.isAccessibilityGranted
+        }
+        .task(id: "\(cleanupEnabled)-\(cleanupBackend)") {
+            if cleanupBackend == TranscriptCleaner.Backend.appleIntelligence.rawValue,
+               !AppleIntelligenceCleaner.isAvailable {
+                cleanupBackend = TranscriptCleaner.Backend.ollama.rawValue
+                return
+            }
+            guard cleanupEnabled, selectedCleanupBackend == .ollama else {
+                ollamaModels = []
+                return
+            }
+            ollamaModels = await OllamaClient().installedModels()
         }
     }
 }

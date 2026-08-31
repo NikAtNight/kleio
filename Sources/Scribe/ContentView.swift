@@ -214,6 +214,7 @@ struct SidebarRow: View {
     @EnvironmentObject private var queue: TranscriptionQueue
     @EnvironmentObject private var appState: AppState
     let document: ScribeDocument
+    @State private var waveformSamples: [Float] = []
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -230,6 +231,19 @@ struct SidebarRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if document.status == .ready, !document.tracks.isEmpty {
+                    waveformThumbnail
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 14)
+                        .task(id: document.id) {
+                            let urls = document.tracks.map {
+                                LibraryStore.folder(for: document.id).appendingPathComponent($0.fileName)
+                            }
+                            let samples = await WaveformSampler.samples(for: urls, bucketCount: 1_000)
+                            guard !Task.isCancelled else { return }
+                            waveformSamples = downsample(samples, to: 48)
+                        }
+                }
             }
         }
         .padding(.vertical, 4)
@@ -258,6 +272,44 @@ struct SidebarRow: View {
         case .failed: return "Failed, \(date)"
         case .recovered: return "Recovered, needs transcription"
         case .ready: return "\(date) · \(document.duration.clockString)"
+        }
+    }
+
+    private var waveformThumbnail: some View {
+        Canvas { context, size in
+            guard !waveformSamples.isEmpty else { return }
+
+            let barWidth: CGFloat = 1.5
+            let barCount = waveformSamples.count
+            let gap = barCount > 1
+                ? max(1, (size.width - CGFloat(barCount) * barWidth) / CGFloat(barCount - 1))
+                : 0
+            let center = size.height / 2
+
+            for (index, sample) in waveformSamples.enumerated() {
+                let height = max(2, CGFloat(sample) * size.height)
+                let rect = CGRect(
+                    x: CGFloat(index) * (barWidth + gap),
+                    y: center - height / 2,
+                    width: barWidth,
+                    height: height
+                )
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: 0.75),
+                    with: .color(Color(nsColor: .tertiaryLabelColor))
+                )
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func downsample(_ samples: [Float], to bucketCount: Int) -> [Float] {
+        guard samples.count > bucketCount else { return samples }
+
+        return (0..<bucketCount).map { index in
+            let start = index * samples.count / bucketCount
+            let end = max(start + 1, (index + 1) * samples.count / bucketCount)
+            return samples[start..<min(end, samples.count)].max() ?? 0
         }
     }
 

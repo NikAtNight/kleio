@@ -8,6 +8,8 @@ struct TranscriptView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var queue: TranscriptionQueue
     @EnvironmentObject private var playback: PlaybackController
+    @EnvironmentObject private var replacements: ReplacementStore
+    @EnvironmentObject private var appState: AppState
     let document: ScribeDocument
 
     @State private var title: String = ""
@@ -20,6 +22,7 @@ struct TranscriptView: View {
     @State private var newSpeakerName = ""
     @State private var summarizing = false
     @State private var summaryError: String?
+    @State private var correctionSuggestions: [(wrong: String, right: String)] = []
 
     private var visibleSegments: [TranscriptSegment] {
         guard !transcriptSearch.isEmpty else { return document.segments }
@@ -48,6 +51,9 @@ struct TranscriptView: View {
         }
         .onDisappear {
             if playback.documentID == document.id { playback.unload() }
+        }
+        .onChange(of: appState.selection) { _, _ in
+            correctionSuggestions = []
         }
         .alert("Summarization Failed", isPresented: summaryErrorBinding) {
             Button("OK", role: .cancel) {}
@@ -92,6 +98,9 @@ struct TranscriptView: View {
             .foregroundStyle(.secondary)
 
             if showFindReplace { findReplaceBar }
+            if let suggestion = correctionSuggestions.first {
+                correctionSuggestion(suggestion)
+            }
             if showPeople { peopleBar }
 
             if summarizing {
@@ -237,6 +246,24 @@ struct TranscriptView: View {
         .padding(.top, 4)
     }
 
+    private func correctionSuggestion(_ suggestion: (wrong: String, right: String)) -> some View {
+        HStack(spacing: 8) {
+            Text("Always replace '\(suggestion.wrong)' with '\(suggestion.right)'?")
+                .font(.callout)
+            Spacer()
+            Button("Add") {
+                _ = replacements.addRule(original: suggestion.wrong, replacement: suggestion.right)
+                dismissCorrectionSuggestion()
+            }
+            .buttonStyle(.bordered)
+            Button("Dismiss", action: dismissCorrectionSuggestion)
+                .buttonStyle(.borderless)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.10)))
+        .padding(.top, 4)
+    }
+
     private var peopleBar: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -278,8 +305,26 @@ struct TranscriptView: View {
         guard var doc = library.document(id: document.id),
               let index = doc.segments.firstIndex(where: { $0.id == segmentID }),
               doc.segments[index].text != text else { return }
+        let oldText = doc.segments[index].text
         doc.segments[index].text = text
         library.update(doc)
+        let corrections = DictationDiff.proposedCorrections(original: oldText, edited: text)
+        guard (1...3).contains(corrections.count),
+              oldText.split(whereSeparator: { $0.isWhitespace }).count
+                == text.split(whereSeparator: { $0.isWhitespace }).count else { return }
+        correctionSuggestions = corrections.filter { correction in
+            !replacements.rules.contains(where: { rule in
+                rule.original.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare(correction.wrong) == .orderedSame
+                    && rule.replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare(correction.right) == .orderedSame
+            })
+        }
+    }
+
+    private func dismissCorrectionSuggestion() {
+        guard !correctionSuggestions.isEmpty else { return }
+        correctionSuggestions.removeFirst()
     }
 
     private func commitSpeakerChange(_ segmentID: UUID, speaker: String?) {
