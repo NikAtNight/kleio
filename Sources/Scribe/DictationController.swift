@@ -182,7 +182,8 @@ final class DictationController: ObservableObject {
                     lastMessage = "No speech detected"
                     return
                 }
-                deliver(text)
+                let cleanedText = await cleanedIfEnabled(text)
+                deliver(cleanedText.text, wasCleaned: cleanedText.wasCleaned)
             } catch {
                 phase = .idle
                 lastMessage = error.localizedDescription
@@ -190,12 +191,26 @@ final class DictationController: ObservableObject {
         }
     }
 
-    private func deliver(_ text: String) {
+    private func cleanedIfEnabled(_ text: String) async -> (text: String, wasCleaned: Bool) {
+        guard TranscriptCleaner.isEnabled else { return (text, false) }
+        do {
+            let cleaned = try await withTimeout(seconds: 3) {
+                try await TranscriptCleaner().clean(text)
+            }
+            return (cleaned, cleaned != text)
+        } catch {
+            return (text, false)
+        }
+    }
+
+    private func deliver(_ text: String, wasCleaned: Bool) {
         guard AXIsProcessTrusted() else {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
             phase = .idle
-            lastMessage = "Copied to clipboard. Allow Accessibility to paste automatically"
+            lastMessage = wasCleaned
+                ? "Cleaned up and copied to clipboard. Allow Accessibility to paste automatically"
+                : "Copied to clipboard. Allow Accessibility to paste automatically"
             return
         }
 
@@ -206,7 +221,9 @@ final class DictationController: ObservableObject {
             TextInjector.inject(text) { [weak self] landed in
                 guard let self else { return }
                 phase = .idle
-                lastMessage = landed ? "Dictation inserted" : "Could not paste dictation"
+                lastMessage = landed
+                    ? (wasCleaned ? "Cleaned up and inserted" : "Inserted")
+                    : "Could not paste dictation"
                 targetApplication = nil
             }
         }
@@ -225,6 +242,27 @@ final class DictationController: ObservableObject {
         case .transcribing:
             dictationHUD?.setPhase(.transcribing)
         }
+    }
+}
+
+private enum DictationCleanupTimeout: Error {
+    case elapsed
+}
+
+private func withTimeout<T: Sendable>(
+    seconds: TimeInterval,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(for: .seconds(seconds))
+            try Task.checkCancellation()
+            throw DictationCleanupTimeout.elapsed
+        }
+        defer { group.cancelAll() }
+        guard let result = try await group.next() else { throw DictationCleanupTimeout.elapsed }
+        return result
     }
 }
 
