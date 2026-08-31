@@ -81,7 +81,7 @@ struct DictationSettings: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .padding(24)
+        .formStyle(.grouped)
         .onAppear { accessibilityGranted = dictation.isAccessibilityGranted }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             accessibilityGranted = dictation.isAccessibilityGranted
@@ -309,7 +309,7 @@ struct GeneralSettings: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .padding(24)
+        .formStyle(.grouped)
     }
 }
 
@@ -429,6 +429,6 @@ struct AISettings: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .padding(24)
+        .formStyle(.grouped)
     }
 }

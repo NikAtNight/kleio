@@ -8,9 +8,18 @@ struct MenuBarView: View {
     @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var dictation: DictationController
+    @EnvironmentObject private var calendarSync: CalendarSync
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        if let nextMeeting, nextMeeting.start.timeIntervalSinceNow <= 60 * 60 {
+            Text("Next: \(nextMeeting.title) at \(nextMeeting.start.formatted(date: .omitted, time: .shortened))")
+            if let joinURL = nextMeeting.joinURL {
+                Button("Join") { NSWorkspace.shared.open(joinURL) }
+            }
+            Divider()
+        }
+
         if dictation.enabled {
             switch dictation.phase {
             case .idle:
@@ -94,5 +103,9 @@ struct MenuBarView: View {
     private func openMain() {
         openWindow(id: "main")
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private var nextMeeting: Meeting? {
+        calendarSync.upcomingMeetings.first { $0.start >= Date() }
     }
 }

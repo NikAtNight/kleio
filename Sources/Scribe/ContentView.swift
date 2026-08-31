@@ -216,11 +216,15 @@ struct SidebarRow: View {
     let document: ScribeDocument
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             statusIcon
-                .frame(width: 18)
+                .frame(width: 20, height: 20)
+                .alignmentGuide(.firstTextBaseline) { dimensions in
+                    dimensions[VerticalAlignment.center]
+                }
             VStack(alignment: .leading, spacing: 2) {
                 Text(document.title)
+                    .font(.body.weight(.regular))
                     .lineLimit(1)
                 Text(subtitle)
                     .font(.caption)
@@ -228,7 +232,7 @@ struct SidebarRow: View {
                     .lineLimit(1)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
         .contextMenu {
             Button("Re-transcribe") { queue.enqueue(document.id) }
                 .disabled(document.status == .transcribing || document.status == .recording)
@@ -292,6 +296,7 @@ struct HomeView: View {
             VStack(spacing: 8) {
                 Image(systemName: "waveform")
                     .font(.system(size: 44, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.tint)
                 Text("Scribe")
                     .font(.largeTitle.bold())
@@ -384,27 +389,51 @@ struct ActionCard: View {
             }
             .padding(14)
             .frame(width: 170, height: 150, alignment: .topLeading)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(hovering ? Color.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor))
-            )
+            .background { cardSurface }
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 14)
                     .strokeBorder(hovering ? Color.accentColor.opacity(0.5) : Color.primary.opacity(0.08))
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ActionCardButtonStyle(hovering: hovering))
         .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: hovering)
+    }
+
+    @ViewBuilder
+    private var cardSurface: some View {
+        if #available(macOS 26.0, *) {
+            Color.clear
+                .glassEffect(in: RoundedRectangle(cornerRadius: 14))
+        } else {
+            RoundedRectangle(cornerRadius: 14)
+                .fill(hovering ? Color.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor))
+        }
+    }
+}
+
+private struct ActionCardButtonStyle: ButtonStyle {
+    let hovering: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .shadow(
+                color: hovering && !configuration.isPressed ? .black.opacity(0.12) : .clear,
+                radius: hovering && !configuration.isPressed ? 6 : 0,
+                y: hovering && !configuration.isPressed ? 2 : 0
+            )
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
 }
 
 struct DropOverlay: View {
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color.accentColor.opacity(0.10))
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [8]))
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.accentColor.opacity(0.08))
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
             VStack(spacing: 8) {
                 Image(systemName: "arrow.down.doc")
                     .font(.system(size: 36))
