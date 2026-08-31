@@ -4,6 +4,32 @@ import SwiftUI
 struct CalendarSettingsView: View {
     @EnvironmentObject private var calendarSync: CalendarSync
     @State private var showsConsentSheet = false
+    @State private var subscriptionURL = ""
+    @State private var subscriptionError: String?
+
+    /// EventKit cannot create subscriptions, so feed URLs are normalized to
+    /// webcal:// and handed to macOS; Calendar shows its subscribe sheet and
+    /// the result flows back into the list through EventKit.
+    private var normalizedSubscriptionURL: URL? {
+        var raw = subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        for scheme in ["https://", "http://"] where raw.lowercased().hasPrefix(scheme) {
+            raw = "webcal://" + raw.dropFirst(scheme.count)
+        }
+        guard raw.lowercased().hasPrefix("webcal://"),
+              let url = URL(string: raw), url.host?.isEmpty == false else { return nil }
+        return url
+    }
+
+    private func subscribe() {
+        guard let url = normalizedSubscriptionURL else {
+            subscriptionError = "Enter a webcal:// or https:// calendar feed URL."
+            return
+        }
+        subscriptionError = nil
+        NSWorkspace.shared.open(url)
+        subscriptionURL = ""
+    }
 
     var body: some View {
         Form {
@@ -34,6 +60,24 @@ struct CalendarSettingsView: View {
                             Toggle(calendar.title, isOn: selectedBinding(for: calendar.calendarIdentifier))
                         }
                     }
+                }
+
+                Section("Subscriptions") {
+                    HStack(spacing: 8) {
+                        TextField("webcal:// or https:// calendar feed", text: $subscriptionURL)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit(subscribe)
+                        Button("Subscribe", action: subscribe)
+                            .disabled(normalizedSubscriptionURL == nil)
+                    }
+                    if let subscriptionError {
+                        Text(subscriptionError)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    Text("macOS handles the subscription; the calendar appears in the list above once added. Calendars from Apple Calendar, Google, or Outlook accounts on this Mac show up automatically.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Reminders") {
