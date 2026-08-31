@@ -392,7 +392,9 @@ struct AISettings: View {
     @AppStorage("aiProvider") private var provider = SummaryService.Provider.anthropic.rawValue
     @AppStorage("aiAPIKey") private var apiKey = ""
     @AppStorage("aiModel") private var model = ""
+    @AppStorage("aiOllamaModel") private var ollamaModel = ""
     @AppStorage("summaryPrompt") private var prompt = ""
+    @State private var ollamaModels: [String] = []
 
     private var selectedProvider: SummaryService.Provider {
         SummaryService.Provider(rawValue: provider) ?? .anthropic
@@ -406,9 +408,24 @@ struct AISettings: View {
                 }
             }
 
-            SecureField("API key:", text: $apiKey)
+            if selectedProvider == .anthropic || selectedProvider == .openai {
+                SecureField("API key:", text: $apiKey)
+            }
 
-            TextField("Model:", text: $model, prompt: Text(selectedProvider.defaultModel))
+            if selectedProvider == .ollama, !ollamaModels.isEmpty {
+                Picker("Model:", selection: $ollamaModel) {
+                    Text("Choose a model").tag("")
+                    ForEach(ollamaModels, id: \.self) { installedModel in
+                        Text(installedModel).tag(installedModel)
+                    }
+                }
+            } else if selectedProvider != .appleIntelligence {
+                TextField(
+                    "Model:",
+                    text: selectedProvider == .ollama ? $ollamaModel : $model,
+                    prompt: Text(selectedProvider.defaultModel)
+                )
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Summary prompt:")
@@ -427,10 +444,19 @@ struct AISettings: View {
                     }
             }
 
-            Text("Summaries send the transcript to the provider you choose, using your own key. Leave the key empty to keep Scribe fully offline.")
+            Text(selectedProvider == .appleIntelligence || selectedProvider == .ollama
+                 ? "Local providers never send the transcript off the Mac."
+                 : "Summaries send the transcript to the provider you choose, using your own key. Leave the key empty to keep Scribe fully offline.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
+        .task(id: provider) {
+            guard selectedProvider == .ollama else {
+                ollamaModels = []
+                return
+            }
+            ollamaModels = await OllamaClient().installedModels()
+        }
     }
 }

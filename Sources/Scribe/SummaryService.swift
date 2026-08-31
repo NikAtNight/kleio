@@ -1,24 +1,31 @@
 import Foundation
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
-/// Optional AI summarization using the user's own API key (Anthropic or
-/// OpenAI), configured in Settings. Nothing leaves the machine unless the
-/// user sets a key and clicks Summarize.
+/// Optional AI summarization using a cloud provider or a local model.
 enum SummaryService {
     enum Provider: String, CaseIterable, Identifiable {
         case anthropic
         case openai
+        case appleIntelligence
+        case ollama
 
         var id: String { rawValue }
         var displayName: String {
             switch self {
             case .anthropic: return "Anthropic (Claude)"
             case .openai: return "OpenAI"
+            case .appleIntelligence: return "Apple Intelligence (on this Mac)"
+            case .ollama: return "Ollama (local)"
             }
         }
         var defaultModel: String {
             switch self {
             case .anthropic: return "claude-sonnet-5"
             case .openai: return "gpt-4o-mini"
+            case .appleIntelligence: return ""
+            case .ollama: return ""
             }
         }
     }
@@ -30,6 +37,9 @@ enum SummaryService {
         var errorDescription: String? {
             switch self {
             case .noKey:
+                if SummaryService.provider == .ollama {
+                    return "Choose an Ollama model in Settings → AI."
+                }
                 return "No API key configured. Add one in Settings → AI."
             case .badResponse(let detail):
                 return "The AI request failed: \(detail)"
@@ -53,7 +63,8 @@ enum SummaryService {
     }
 
     static var model: String {
-        let stored = UserDefaults.standard.string(forKey: "aiModel") ?? ""
+        let key = provider == .ollama ? "aiOllamaModel" : "aiModel"
+        let stored = UserDefaults.standard.string(forKey: key) ?? ""
         return stored.isEmpty ? provider.defaultModel : stored
     }
 
@@ -62,7 +73,16 @@ enum SummaryService {
         return stored.isEmpty ? defaultPrompt : stored
     }
 
-    static var isConfigured: Bool { !apiKey.isEmpty }
+    static var isConfigured: Bool {
+        switch provider {
+        case .anthropic, .openai:
+            return !apiKey.isEmpty
+        case .appleIntelligence:
+            return true
+        case .ollama:
+            return !model.isEmpty
+        }
+    }
 
     static func summarize(_ doc: ScribeDocument) async throws -> String {
         guard isConfigured else { throw SummaryError.noKey }
@@ -78,7 +98,30 @@ enum SummaryService {
         switch provider {
         case .anthropic: return try await callAnthropic(userMessage)
         case .openai: return try await callOpenAI(userMessage)
+        case .appleIntelligence: return try await callAppleIntelligence(userMessage)
+        case .ollama: return try await OllamaClient().generate(model: model, prompt: userMessage)
         }
+    }
+
+    private static func callAppleIntelligence(_ message: String) async throws -> String {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw SummaryError.badResponse("Apple Intelligence requires macOS 26 or later.")
+        }
+        guard case .available = SystemLanguageModel.default.availability else {
+            throw SummaryError.badResponse(
+                "Apple Intelligence is unavailable on this Mac. Enable it in System Settings and try again."
+            )
+        }
+        let session = LanguageModelSession()
+        let response = try await session.respond(
+            to: message,
+            options: GenerationOptions(temperature: 0.2)
+        )
+        return response.content
+        #else
+        throw SummaryError.badResponse("Apple Intelligence is unavailable in this version of macOS.")
+        #endif
     }
 
     private static func callAnthropic(_ message: String) async throws -> String {
