@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Full-screen state while a recording is in flight: pulsing indicator,
-/// elapsed clock, per-source level meters, pause/stop/discard.
+/// Full-screen state while a recording is in flight. The waveform keeps each
+/// recorded side visible without asking the user to read separate meters.
 struct ActiveRecordingView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var queue: TranscriptionQueue
@@ -23,75 +23,62 @@ struct ActiveRecordingView: View {
         activeDocument?.tracks.contains { $0.source == .system } ?? false
     }
 
+    private var waveformLanes: [LiveWaveformLane] {
+        if recordsMic && recordsSystem {
+            return [
+                LiveWaveformLane(label: "You", history: recording.micHistory, color: .blue),
+                LiveWaveformLane(label: "Them", history: recording.systemHistory, color: .purple),
+            ]
+        }
+        if recordsMic {
+            return [LiveWaveformLane(label: "You", history: recording.micHistory, color: .accentColor)]
+        }
+        if recordsSystem {
+            return [LiveWaveformLane(label: "Them", history: recording.systemHistory, color: .accentColor)]
+        }
+        return []
+    }
+
     var body: some View {
-        VStack(spacing: 28) {
-            Spacer()
+        VStack(spacing: 0) {
+            Spacer(minLength: 24)
 
-            ZStack {
-                Circle()
-                    .fill(Color.red.opacity(recording.isPaused ? 0 : 0.25))
-                    .frame(width: 84, height: 84)
-                    .scaleEffect(pulse ? 1.25 : 0.9)
-                    .animation(.easeInOut(duration: 1).repeatForever(autoreverses: true), value: pulse)
-                Circle()
-                    .fill(recording.isPaused ? Color.orange : Color.red)
-                    .frame(width: 56, height: 56)
-                Image(systemName: recording.isPaused ? "pause.fill" : "waveform")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .onAppear { pulse = true }
+            LiveWaveformView(lanes: waveformLanes, isPaused: recording.isPaused)
+                .padding(.horizontal, 24)
 
-            VStack(spacing: 4) {
-                Text(recording.elapsed.clockString)
-                    .font(.system(size: 44, weight: .semibold).monospacedDigit())
-                Text(recording.isPaused ? "Paused" : (activeDocument?.title ?? "Recording…"))
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(spacing: 12) {
-                if recordsMic {
-                    LevelMeter(label: "Microphone (You)", icon: "mic.fill", level: recording.micLevel)
-                }
-                if recordsSystem {
-                    LevelMeter(label: "System Audio (Them)", icon: "macbook.and.wave.form", level: recording.systemLevel)
-                }
-            }
-            .frame(maxWidth: 380)
+            Spacer(minLength: 22)
 
             HStack(spacing: 12) {
-                Button {
-                    recording.togglePause()
-                } label: {
-                    Label(recording.isPaused ? "Resume" : "Pause",
-                          systemImage: recording.isPaused ? "play.fill" : "pause.fill")
-                        .frame(minWidth: 90)
-                }
-                .controlSize(.large)
-
-                Button {
-                    let id = recording.activeDocumentID
-                    recording.stop(library: library, queue: queue)
-                    appState.selection = id
-                } label: {
-                    Label("Stop & Transcribe", systemImage: "stop.fill")
-                        .frame(minWidth: 150)
-                }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-
-                Button("Discard", role: .destructive) {
-                    confirmDiscard = true
-                }
-                .controlSize(.large)
+                Circle()
+                    .fill(recording.isPaused ? .orange : .red)
+                    .frame(width: 8, height: 8)
+                    .opacity(recording.isPaused ? 1 : (pulse ? 1 : 0.45))
+                    .animation(
+                        recording.isPaused ? .default : .easeInOut(duration: 1).repeatForever(autoreverses: true),
+                        value: pulse
+                    )
+                Text(recording.elapsed.clockString)
+                    .font(.system(size: 56, weight: .semibold).monospacedDigit())
+            }
+            .onAppear { pulse = !recording.isPaused }
+            .onChange(of: recording.isPaused) { _, isPaused in
+                pulse = !isPaused
             }
 
-            Text("Audio is saved to disk continuously — even a crash can't lose it.")
+            Text(recording.isPaused ? "Paused" : (activeDocument?.title ?? "Recording"))
+                .foregroundStyle(.secondary)
+                .padding(.top, 6)
+
+            Spacer(minLength: 30)
+
+            controlCluster
+
+            Spacer(minLength: 24)
+
+            Text("Audio saves to disk continuously. A crash cannot lose it.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
-
-            Spacer()
+                .padding(.bottom, 28)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .confirmationDialog("Discard this recording?", isPresented: $confirmDiscard) {
@@ -100,6 +87,46 @@ struct ActiveRecordingView: View {
             }
         } message: {
             Text("The audio recorded so far will be deleted permanently.")
+        }
+    }
+
+    private var controlButtons: some View {
+        HStack(spacing: 12) {
+            Button {
+                recording.togglePause()
+            } label: {
+                Label(recording.isPaused ? "Resume" : "Pause",
+                      systemImage: recording.isPaused ? "play.fill" : "pause.fill")
+                    .frame(minWidth: 90)
+            }
+            .controlSize(.large)
+
+            Button {
+                let id = recording.activeDocumentID
+                recording.stop(library: library, queue: queue)
+                appState.selection = id
+            } label: {
+                Label("Stop & Transcribe", systemImage: "stop.fill")
+                    .frame(minWidth: 150)
+            }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+
+            Button("Discard", role: .destructive) {
+                confirmDiscard = true
+            }
+            .controlSize(.large)
+        }
+        .padding(12)
+    }
+
+    @ViewBuilder
+    private var controlCluster: some View {
+        if #available(macOS 26.0, *) {
+            controlButtons.glassEffect(.regular, in: Capsule())
+        } else {
+            controlButtons.background(.regularMaterial, in: Capsule())
         }
     }
 }
