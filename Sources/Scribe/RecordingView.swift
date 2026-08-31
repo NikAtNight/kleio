@@ -111,7 +111,7 @@ struct ActiveRecordingView: View {
             Button {
                 let id = recording.activeDocumentID
                 recording.stop(library: library, queue: queue)
-                appState.selection = id
+                if let id { appState.select(document: id) }
             } label: {
                 Label("Stop & Transcribe", systemImage: "stop.fill")
                     .frame(minWidth: 150)

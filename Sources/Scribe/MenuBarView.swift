@@ -56,7 +56,7 @@ struct MenuBarView: View {
             Button("Stop & Transcribe") {
                 let id = recording.activeDocumentID
                 recording.stop(library: library, queue: queue)
-                appState.selection = id
+                if let id { appState.select(document: id) }
                 openMain()
             }
             Button("Discard Recording") {
@@ -80,7 +80,7 @@ struct MenuBarView: View {
             Menu("Recent Transcripts") {
                 ForEach(Array(recent)) { doc in
                     Button(doc.title) {
-                        appState.selection = doc.id
+                        appState.select(document: doc.id)
                         openMain()
                     }
                 }

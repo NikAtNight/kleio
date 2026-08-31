@@ -79,13 +79,28 @@ enum Main {
 
 /// Cross-scene UI state (sidebar selection, importer visibility) shared by
 /// the main window and the menu bar extra.
+enum MainSelection: Hashable {
+    case home
+    case document(UUID)
+    case meeting(String)
+}
+
 @MainActor
 final class AppState: ObservableObject {
     enum ImportMode { case files, podcast }
 
-    @Published var selection: UUID?
+    @Published var selection: MainSelection = .home
     @Published var showImporter = false
     @Published var importMode: ImportMode = .files
+
+    var selectedDocumentID: UUID? {
+        guard case .document(let id) = selection else { return nil }
+        return id
+    }
+
+    func select(document id: UUID) {
+        selection = .document(id)
+    }
 
     func presentImporter(_ mode: ImportMode = .files) {
         importMode = mode
@@ -134,7 +149,7 @@ struct ScribeApp: App {
                     )
                     appDelegate.onOpenFiles = { urls in
                         let ids = Importer.importFiles(urls, library: library, queue: queue)
-                        if let first = ids.first { appState.selection = first }
+                        if let first = ids.first { appState.select(document: first) }
                     }
                     appDelegate.calendarSync = calendarSync
                     appDelegate.autoRecordArbiter = autoRecordArbiter

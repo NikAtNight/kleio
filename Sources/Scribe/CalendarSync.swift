@@ -13,6 +13,8 @@ struct Meeting: Identifiable, Equatable {
     let calendarColor: NSColor
     let joinURL: URL?
     let attendeeCount: Int
+    let notes: String?
+    let location: String?
 
     var id: String { "\(eventID)-\(start.timeIntervalSince1970)" }
 
@@ -25,7 +27,9 @@ struct Meeting: Identifiable, Equatable {
         lhs.calendarTitle == rhs.calendarTitle &&
         lhs.calendarColor.isEqual(rhs.calendarColor) &&
         lhs.joinURL == rhs.joinURL &&
-        lhs.attendeeCount == rhs.attendeeCount
+        lhs.attendeeCount == rhs.attendeeCount &&
+        lhs.notes == rhs.notes &&
+        lhs.location == rhs.location
     }
 }
 
@@ -363,7 +367,9 @@ final class CalendarSync: NSObject, ObservableObject {
             calendarTitle: event.calendar.title,
             calendarColor: color,
             joinURL: joinURL,
-            attendeeCount: attendeeCount
+            attendeeCount: attendeeCount,
+            notes: event.notes,
+            location: event.location
         )
     }
 

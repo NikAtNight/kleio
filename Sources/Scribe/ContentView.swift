@@ -64,10 +64,10 @@ struct ContentView: View {
                 switch appState.importMode {
                 case .files:
                     let ids = Importer.importFiles(urls, library: library, queue: queue)
-                    if let first = ids.first { appState.selection = first }
+                    if let first = ids.first { appState.select(document: first) }
                 case .podcast:
                     if let id = Importer.importPodcast(urls, library: library, queue: queue) {
-                        appState.selection = id
+                        appState.select(document: id)
                     }
                 }
             }
@@ -92,11 +92,23 @@ struct ContentView: View {
     private var detail: some View {
         if recording.isRecording {
             ActiveRecordingView()
-        } else if let id = appState.selection, let doc = library.document(id: id) {
-            DocumentDetailView(document: doc)
-                .id(doc.id)
         } else {
-            HomeView()
+            switch appState.selection {
+            case .home:
+                HomeView()
+                    .background(Theme.paperBackground)
+            case .document(let id):
+                if let document = library.document(id: id) {
+                    DocumentDetailView(document: document)
+                        .id(document.id)
+                        .background(Theme.paperBackground)
+                } else {
+                    HomeView()
+                        .background(Theme.paperBackground)
+                }
+            case .meeting(let id):
+                MeetingDetailView(meetingID: id)
+            }
         }
     }
 
@@ -121,7 +133,7 @@ struct ContentView: View {
         }
         group.notify(queue: .main) {
             let ids = Importer.importFiles(urls, library: library, queue: queue)
-            if let first = ids.first { appState.selection = first }
+            if let first = ids.first { appState.select(document: first) }
         }
         return found
     }
@@ -139,11 +151,12 @@ struct RecordMenu: View {
             Button {
                 let id = recording.activeDocumentID
                 recording.stop(library: library, queue: queue)
-                appState.selection = id
+                if let id { appState.select(document: id) }
             } label: {
                 Label("Stop", systemImage: "stop.circle.fill")
-                    .foregroundStyle(.red)
             }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
             .help("Stop recording and transcribe")
         } else {
             Menu {
@@ -156,8 +169,9 @@ struct RecordMenu: View {
                 }
             } label: {
                 Label("Record", systemImage: "record.circle")
-                    .foregroundStyle(.red)
             }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
             .help("Start a new recording")
         }
     }
@@ -171,9 +185,8 @@ struct RecordMenu: View {
 
 struct SidebarView: View {
     @EnvironmentObject private var library: LibraryStore
-    @EnvironmentObject private var queue: TranscriptionQueue
-    @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var calendarSync: CalendarSync
     @Binding var searchText: String
 
     private var filtered: [ScribeDocument] {
@@ -184,28 +197,131 @@ struct SidebarView: View {
         }
     }
 
+    private var documentGroups: [DocumentGroup] {
+        let calendar = Calendar.current
+        let now = Date()
+        let previousWeekStart = calendar.date(byAdding: .day, value: -7, to: calendar.startOfDay(for: now)) ?? now
+        let documents = filtered.sorted { $0.createdAt > $1.createdAt }
+
+        return [
+            DocumentGroup(title: "Today", documents: documents.filter { calendar.isDateInToday($0.createdAt) }),
+            DocumentGroup(title: "Yesterday", documents: documents.filter { calendar.isDateInYesterday($0.createdAt) }),
+            DocumentGroup(
+                title: "Previous 7 Days",
+                documents: documents.filter {
+                    !calendar.isDateInToday($0.createdAt) &&
+                    !calendar.isDateInYesterday($0.createdAt) &&
+                    $0.createdAt >= previousWeekStart
+                }
+            ),
+            DocumentGroup(title: "Older", documents: documents.filter { $0.createdAt < previousWeekStart })
+        ].filter { !$0.documents.isEmpty }
+    }
+
+    private var upcomingMeetings: [Meeting] {
+        let now = Date()
+        let cutoff = now.addingTimeInterval(7 * 24 * 60 * 60)
+        return calendarSync.upcomingMeetings.filter { $0.start >= now && $0.start <= cutoff }
+    }
+
     var body: some View {
         List(selection: $appState.selection) {
-            if !filtered.isEmpty {
-                Section("Library") {
-                    ForEach(filtered) { doc in
-                        SidebarRow(document: doc)
-                            .tag(doc.id)
+            Section {
+                Text("Scribe")
+                    .font(Theme.displayTitle(size: 22))
+                    .foregroundStyle(.primary)
+                Label("Home", systemImage: "house")
+                    .tag(MainSelection.home)
+            }
+
+            if !documentGroups.isEmpty {
+                Section {
+                    Label("Recordings", systemImage: "clock")
+                        .font(Theme.metaLabel)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            ForEach(documentGroups) { group in
+                Section(group.title) {
+                    ForEach(group.documents) { document in
+                        SidebarRow(document: document)
+                            .tag(MainSelection.document(document.id))
+                    }
+                }
+            }
+
+            if calendarSync.isEnabled && !upcomingMeetings.isEmpty {
+                Section("UPCOMING") {
+                    ForEach(upcomingMeetings) { meeting in
+                        UpcomingMeetingRow(meeting: meeting)
+                            .tag(MainSelection.meeting(meeting.id))
                     }
                 }
             }
         }
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                SettingsLink {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .buttonStyle(.plain)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(.bar)
+        }
         .overlay {
-            if library.documents.isEmpty {
+            if library.documents.isEmpty && upcomingMeetings.isEmpty {
                 ContentUnavailableView(
                     "No transcripts yet",
                     systemImage: "waveform",
                     description: Text("Record a call or drop in an audio file.")
                 )
-            } else if filtered.isEmpty {
+            } else if !searchText.isEmpty && filtered.isEmpty && upcomingMeetings.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             }
         }
+    }
+}
+
+private struct DocumentGroup: Identifiable {
+    let title: String
+    let documents: [ScribeDocument]
+
+    var id: String { title }
+}
+
+private struct UpcomingMeetingRow: View {
+    let meeting: Meeting
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color(nsColor: meeting.calendarColor))
+                .frame(width: 7, height: 7)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(meeting.title)
+                    .lineLimit(1)
+                Text(MeetingPresentation.relativeStart(for: meeting.start))
+                    .font(Theme.metaValue)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 4)
+
+            if let provider = MeetingPresentation.providerName(for: meeting.joinURL) {
+                Text(provider)
+                    .font(Theme.metaLabel)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 
@@ -255,7 +371,7 @@ struct SidebarRow: View {
             }
             Divider()
             Button("Delete", role: .destructive) {
-                if appState.selection == document.id { appState.selection = nil }
+                if appState.selectedDocumentID == document.id { appState.selection = .home }
                 library.delete(document)
             }
         }
@@ -501,7 +617,7 @@ struct RecentDocumentCard: View {
 
     var body: some View {
         Button {
-            appState.selection = document.id
+            appState.select(document: document.id)
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 waveformThumbnail
@@ -542,7 +658,7 @@ struct RecentDocumentCard: View {
             }
             Divider()
             Button("Delete", role: .destructive) {
-                if appState.selection == document.id { appState.selection = nil }
+                if appState.selectedDocumentID == document.id { appState.selection = .home }
                 library.delete(document)
             }
         }
