@@ -15,6 +15,10 @@ struct Meeting: Identifiable, Equatable {
     let attendeeCount: Int
     let notes: String?
     let location: String?
+    /// True when the event looks like a call (conferencing link or attendees).
+    /// Non-meetings still appear in the sidebar; only meetings get
+    /// notifications, Up Next placement, and auto-record eligibility.
+    let isMeeting: Bool
 
     var id: String { "\(eventID)-\(start.timeIntervalSince1970)" }
 
@@ -276,6 +280,7 @@ final class CalendarSync: NSObject, ObservableObject {
         guard autoRecordEnabled else { return [] }
         let enabledCalendarIDs = Set(autoRecordCalendarIDs)
         return fetchedMeetings.compactMap { meeting in
+            guard meeting.isMeeting else { return nil }
             let override = autoRecordOverride(for: meeting.eventID)
             guard override ?? enabledCalendarIDs.contains(meeting.calendarIdentifier) else { return nil }
             let armDate = meeting.start.addingTimeInterval(-TimeInterval(leadMinutes * 60))
@@ -354,9 +359,6 @@ final class CalendarSync: NSObject, ObservableObject {
             notes: event.notes
         )
         let attendeeCount = event.attendees?.count ?? 0
-        guard MeetingDetector.qualifies(joinURL: joinURL, attendeeCount: attendeeCount, onlyWithLinks: onlyWithLinks) else {
-            return nil
-        }
         let color = event.calendar.cgColor.flatMap(NSColor.init(cgColor:)) ?? .secondaryLabelColor
         return Meeting(
             eventID: event.eventIdentifier,
@@ -369,7 +371,12 @@ final class CalendarSync: NSObject, ObservableObject {
             joinURL: joinURL,
             attendeeCount: attendeeCount,
             notes: event.notes,
-            location: event.location
+            location: event.location,
+            isMeeting: MeetingDetector.qualifies(
+                joinURL: joinURL,
+                attendeeCount: attendeeCount,
+                onlyWithLinks: onlyWithLinks
+            )
         )
     }
 
@@ -395,7 +402,7 @@ final class CalendarSync: NSObject, ObservableObject {
         guard isBundledApp else { return }
         let center = UNUserNotificationCenter.current()
         let notificationMeetings = upcomingMeetings.filter {
-            $0.start > now && $0.start <= now.addingTimeInterval(24 * 60 * 60)
+            $0.isMeeting && $0.start > now && $0.start <= now.addingTimeInterval(24 * 60 * 60)
         }
         let currentIDs = Set(notificationMeetings.map(notificationIdentifier))
         center.getPendingNotificationRequests { [weak self] requests in

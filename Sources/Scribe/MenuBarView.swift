@@ -106,6 +106,6 @@ struct MenuBarView: View {
     }
 
     private var nextMeeting: Meeting? {
-        calendarSync.upcomingMeetings.first { $0.start >= Date() }
+        calendarSync.upcomingMeetings.first { $0.isMeeting && $0.start >= Date() }
     }
 }

@@ -251,11 +251,30 @@ struct SidebarView: View {
                 }
             }
 
-            if calendarSync.isEnabled && !upcomingMeetings.isEmpty {
+            // The section stays visible whenever sync is on, so an empty list
+            // explains itself instead of silently vanishing.
+            if calendarSync.isEnabled {
                 Section("UPCOMING") {
-                    ForEach(upcomingMeetings) { meeting in
-                        UpcomingMeetingRow(meeting: meeting)
-                            .tag(MainSelection.meeting(meeting.id))
+                    if calendarSync.authorizationStatus != .fullAccess {
+                        Button {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            Label("Grant calendar access…", systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Scribe needs Calendar access to show your upcoming events")
+                    } else if upcomingMeetings.isEmpty {
+                        Text("No events in the next 7 days")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(upcomingMeetings) { meeting in
+                            UpcomingMeetingRow(meeting: meeting)
+                                .tag(MainSelection.meeting(meeting.id))
+                        }
                     }
                 }
             }

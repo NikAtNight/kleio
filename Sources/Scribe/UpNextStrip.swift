@@ -5,7 +5,7 @@ struct UpNextStrip: View {
     @EnvironmentObject private var calendarSync: CalendarSync
 
     private var todaysMeetings: [Meeting] {
-        calendarSync.upcomingMeetings.filter { Calendar.current.isDateInToday($0.start) }
+        calendarSync.upcomingMeetings.filter { $0.isMeeting && Calendar.current.isDateInToday($0.start) }
     }
 
     var body: some View {
