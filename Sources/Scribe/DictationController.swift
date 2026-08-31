@@ -16,8 +16,16 @@ final class DictationController: ObservableObject {
         case transcribing
     }
 
-    @Published private(set) var phase: Phase = .idle
-    @Published private(set) var level: Float = 0
+    @Published private(set) var phase: Phase = .idle {
+        didSet { updateHUD(for: phase) }
+    }
+    @Published private(set) var level: Float = 0 {
+        didSet {
+            if phase == .recording {
+                dictationHUD?.update(level: level)
+            }
+        }
+    }
     @Published private(set) var lastMessage: String?
     @Published private(set) var enabled: Bool
 
@@ -27,6 +35,7 @@ final class DictationController: ObservableObject {
     private var recorder: MicRecorder?
     private var recordingURL: URL?
     private var targetApplication: NSRunningApplication?
+    private var dictationHUD: DictationHUD?
     private let transcriber = Transcriber()
     private lazy var hotKey = GlobalHotKey { [weak self] in
         Task { @MainActor in self?.toggle() }
@@ -200,6 +209,21 @@ final class DictationController: ObservableObject {
                 lastMessage = landed ? "Dictation inserted" : "Could not paste dictation"
                 targetApplication = nil
             }
+        }
+    }
+
+    private func updateHUD(for phase: Phase) {
+        guard NSApp != nil else { return }
+        switch phase {
+        case .idle:
+            dictationHUD?.hide()
+        case .preparing:
+            if dictationHUD == nil { dictationHUD = DictationHUD() }
+            dictationHUD?.show(.preparing)
+        case .recording:
+            dictationHUD?.setPhase(.recording)
+        case .transcribing:
+            dictationHUD?.setPhase(.transcribing)
         }
     }
 }

@@ -142,8 +142,10 @@ final class SystemAudioTap {
                 try file.write(from: buffer)
                 self.writesOK.increment()
             } catch {
-                if self.firstWriteError.isEmpty { self.firstWriteError = "\(error)" }
-                NSLog("Scribe: system tap write failed: %@", error.localizedDescription)
+                if self.firstWriteError.isEmpty {
+                    self.firstWriteError = "\(error)"
+                    DiagLog.log("system audio tap write failed: %@", error.localizedDescription)
+                }
             }
             // Level metering ~10x/sec is plenty; buffers arrive ~100x/sec.
             levelCounter += 1
@@ -185,6 +187,7 @@ final class SystemAudioTap {
 
     private func check(_ status: OSStatus, _ stage: String) throws {
         guard status == noErr else {
+            DiagLog.log("system audio tap failed at %@: status %d", stage, status)
             cleanup()
             throw TapError.osStatus(stage, status)
         }

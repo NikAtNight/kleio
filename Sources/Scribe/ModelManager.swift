@@ -94,7 +94,7 @@ final class ModelManager: ObservableObject {
             downloadProgress[variant] = nil
             refresh()
         } catch {
-            NSLog("Scribe: model download failed for %@: %@", variant, error.localizedDescription)
+            DiagLog.log("model download failed for %@: %@", variant, error.localizedDescription)
             downloadProgress[variant] = nil
             refresh()
         }
@@ -122,9 +122,9 @@ final class ModelManager: ObservableObject {
             try? fm.createDirectory(at: modelsFolder, withIntermediateDirectories: true)
             do {
                 try fm.copyItem(at: localFlow.appendingPathComponent(variant), to: dest)
-                NSLog("Scribe: seeded model %@ from LocalFlow", variant)
+                DiagLog.log("seeded model %@ from LocalFlow", variant)
             } catch {
-                NSLog("Scribe: model seed failed: %@", error.localizedDescription)
+                DiagLog.log("model seed failed for %@: %@", variant, error.localizedDescription)
             }
         }
     }
