@@ -1,9 +1,8 @@
 import SwiftUI
 import AppKit
 
-/// The transcript reading/editing view: header with editable title and
-/// metadata, optional AI summary, searchable timestamped segments that
-/// follow playback, and a player bar at the bottom.
+/// The document view: header and tabs for a summary, transcript, and notes,
+/// with a player bar at the bottom.
 struct TranscriptView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var queue: TranscriptionQueue
@@ -24,6 +23,15 @@ struct TranscriptView: View {
     @State private var summarizing = false
     @State private var summaryError: String?
     @State private var correctionSuggestions: [(wrong: String, right: String)] = []
+    @State private var selectedTab: DocumentTab = .transcript
+
+    private enum DocumentTab: String, CaseIterable, Identifiable {
+        case summary = "Summary"
+        case transcript = "Transcript"
+        case notes = "Notes"
+
+        var id: Self { self }
+    }
 
     private var visibleSegments: [TranscriptSegment] {
         guard !transcriptSearch.isEmpty else { return document.segments }
@@ -48,13 +56,25 @@ struct TranscriptView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            segmentList
+            Picker("Document section", selection: $selectedTab) {
+                ForEach(DocumentTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            Divider()
+            tabContent
             Divider()
             PlayerBar(document: document)
         }
+        .background(Theme.paperBackground)
         .toolbar { toolbarContent }
         .task(id: document.id) {
             title = document.title
+            selectedTab = hasSummary ? .summary : .transcript
             await playback.load(document: document)
         }
         .onDisappear {
@@ -74,73 +94,126 @@ struct TranscriptView: View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Title", text: $title)
                 .textFieldStyle(.plain)
-                .font(.title2.bold())
+                .font(Theme.displayTitle(size: 30))
                 .onSubmit(commitTitle)
 
-            HStack(spacing: 8) {
-                metadataItem(document.createdAt.formatted(date: .abbreviated, time: .shortened))
-                metadataItem(document.duration.clockString)
+            HStack(spacing: 0) {
+                Text(document.createdAt.formatted(date: .abbreviated, time: .shortened))
+                Text(" · ")
+                Text(document.duration.clockString)
                 if let model = document.modelUsed {
-                    metadataItem(ModelManager.catalog.first { $0.variant == model }?.displayName ?? model)
+                    Text(" · ")
+                    Text(ModelManager.catalog.first { $0.variant == model }?.displayName ?? model)
                 }
                 if document.isMeetingRecording {
-                    Label("Meeting", systemImage: "person.2.wave.2")
-                        .font(.caption)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                    Text(" · Meeting")
                 }
                 Spacer()
-                TextField("Find in transcript", text: $transcriptSearch)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 220)
-                Button {
-                    showFindReplace.toggle()
-                } label: {
-                    Image(systemName: "arrow.left.arrow.right")
-                }
-                .buttonStyle(.borderless)
-                .keyboardShortcut("f", modifiers: [.command, .shift])
-                .help("Find and replace")
             }
+            .font(Theme.metaValue)
             .foregroundStyle(.secondary)
-
-            if showFindReplace { findReplaceBar }
-            if let suggestion = correctionSuggestions.first {
-                correctionSuggestion(suggestion)
-            }
-            if showPeople { peopleBar }
-
-            if summarizing {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Summarizing…").font(.callout).foregroundStyle(.secondary)
-                }
-                .padding(.top, 4)
-            } else if let summary = document.summary, !summary.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Summary", systemImage: "sparkles")
-                        .font(.callout.bold())
-                    // LocalizedStringKey keeps the AI summary's markdown rendering.
-                    Text(LocalizedStringKey(summary))
-                        .font(.callout)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
-            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
     }
 
-    private func metadataItem(_ text: String) -> some View {
-        Text(text)
-            .font(.callout)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(Color.secondary.opacity(0.08)))
+    private var hasSummary: Bool {
+        guard let summary = document.summary else { return false }
+        return !summary.isEmpty
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch selectedTab {
+        case .summary:
+            summaryTab
+        case .transcript:
+            transcriptTab
+        case .notes:
+            NotesTab(document: document)
+        }
+    }
+
+    private var summaryTab: some View {
+        Group {
+            if let summary = document.summary, !summary.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Label("Summary", systemImage: "sparkles")
+                                .font(.callout.bold())
+                            Spacer()
+                            Button("Regenerate", action: summarize)
+                                .buttonStyle(.bordered)
+                                .disabled(summarizing || document.segments.isEmpty)
+                        }
+                        // LocalizedStringKey keeps the AI summary's markdown rendering.
+                        Text(LocalizedStringKey(summary))
+                            .font(.callout)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if summarizing {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Summarizing…")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Theme.cardBackground))
+                    .padding(20)
+                }
+            } else {
+                ContentUnavailableView {
+                    Label("No summary yet", systemImage: "sparkles")
+                } description: {
+                    Text("Generate a short overview of this transcript.")
+                } actions: {
+                    Button("Generate Summary", action: summarize)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(summarizing || document.segments.isEmpty)
+                    if summarizing {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var transcriptTab: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    TextField("Find in transcript", text: $transcriptSearch)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 220)
+                    Button {
+                        showFindReplace.toggle()
+                    } label: {
+                        Image(systemName: "arrow.left.arrow.right")
+                    }
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
+                    .help("Find and replace")
+                    Spacer()
+                }
+
+                if showFindReplace { findReplaceBar }
+                if let suggestion = correctionSuggestions.first {
+                    correctionSuggestion(suggestion)
+                }
+                if showPeople { peopleBar }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+
+            segmentList
+        }
     }
 
     private var segmentList: some View {
@@ -175,6 +248,7 @@ struct TranscriptView: View {
                 }
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .overlay {
                 if document.segments.isEmpty && (document.notes ?? []).isEmpty {
                     ContentUnavailableView(
@@ -216,6 +290,7 @@ struct TranscriptView: View {
             .help("Export the transcript")
 
             Button {
+                selectedTab = .transcript
                 showPeople.toggle()
             } label: {
                 Label("People", systemImage: "person.2")
