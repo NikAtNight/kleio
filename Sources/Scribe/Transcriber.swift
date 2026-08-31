@@ -20,11 +20,20 @@ actor Transcriber {
     private var whisperKit: WhisperKit?
     private(set) var loadedModel: String?
     private var loadGeneration = 0
+    private var vocabularyTerms: [String]?
+    private var vocabularyTokens: [Int]?
     /// Read by WhisperKit's synchronous early-stop callback, which runs
     /// off-actor — hence a lock-guarded flag rather than actor state.
     private let cancelFlag = CancelFlag()
 
     var isLoaded: Bool { whisperKit != nil }
+
+    /// Names and correction targets that Whisper should treat as prior text.
+    /// Passing nil removes the bias.
+    func setVocabulary(_ terms: [String]?) {
+        vocabularyTerms = terms
+        refreshVocabularyTokens()
+    }
 
     /// Loads (and if needed downloads) the given model. Safe to call again
     /// with a different model name: the previous pipeline keeps serving until
@@ -41,6 +50,7 @@ actor Transcriber {
         guard generation == loadGeneration else { return }
         whisperKit = pipe
         loadedModel = model
+        refreshVocabularyTokens()
     }
 
     nonisolated func cancelCurrent() {
@@ -60,6 +70,10 @@ actor Transcriber {
         guard let whisperKit else { throw TranscriberError.notLoaded }
         cancelFlag.clear()
 
+        // The queue already owns the configured ReplacementStore. Reading the
+        // saved terms here keeps the prompt current without changing its API.
+        setVocabulary(ReplacementStore.vocabularyTerms())
+
         var options = DecodingOptions()
         options.task = translate ? .translate : .transcribe
         options.temperature = 0
@@ -68,6 +82,7 @@ actor Transcriber {
         } else if loadedModel?.hasSuffix(".en") == true {
             options.language = "en"
         }
+        options.promptTokens = vocabularyTokens
 
         let duration = max(audioDuration(of: url), 0.1)
         let flag = cancelFlag
@@ -88,6 +103,20 @@ actor Transcriber {
         if cancelFlag.isSet { throw TranscriberError.cancelled }
 
         return Self.segments(from: results, source: source)
+    }
+
+    private func refreshVocabularyTokens() {
+        guard let whisperKit, let tokenizer = whisperKit.tokenizer else {
+            vocabularyTokens = nil
+            return
+        }
+        let terms = (vocabularyTerms ?? []).filter { !$0.isEmpty }
+        guard !terms.isEmpty else {
+            vocabularyTokens = nil
+            return
+        }
+        let tokens = tokenizer.encode(text: " Glossary: \(terms.joined(separator: ", ")).")
+        vocabularyTokens = tokens.isEmpty ? nil : Array(tokens.prefix(96))
     }
 
     /// Extracts the last `<|12.34|>` timestamp token from in-flight decoder

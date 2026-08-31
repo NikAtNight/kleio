@@ -25,7 +25,7 @@ final class ReplacementStore: ObservableObject {
         didSet { UserDefaults.standard.set(removeFillerWords, forKey: "removeFillerWords") }
     }
 
-    private static let rulesKey = "textReplacementRules"
+    nonisolated private static let rulesKey = "textReplacementRules"
 
     init() {
         if let data = UserDefaults.standard.data(forKey: Self.rulesKey),
@@ -42,6 +42,37 @@ final class ReplacementStore: ObservableObject {
 
     func addRule() {
         rules.append(TextReplacement())
+    }
+
+    /// Adds a finished correction once. Empty and duplicate rules do not
+    /// belong in the cleanup pass or the recognition vocabulary.
+    @discardableResult
+    func addRule(original: String, replacement: String) -> Bool {
+        let original = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replacement = replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !original.isEmpty, !replacement.isEmpty,
+              !rules.contains(where: {
+                  $0.original.trimmingCharacters(in: .whitespacesAndNewlines)
+                      .caseInsensitiveCompare(original) == .orderedSame
+                      && $0.replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+                      .caseInsensitiveCompare(replacement) == .orderedSame
+              }) else { return false }
+        rules.append(TextReplacement(original: original, replacement: replacement))
+        return true
+    }
+
+    /// Terms that should bias recognition toward a correction the user has
+    /// already taught Scribe. This reads persisted rules for transcribers
+    /// that do not share the SwiftUI store instance, such as headless jobs.
+    nonisolated static func vocabularyTerms() -> [String] {
+        let saved = (UserDefaults.standard.data(forKey: rulesKey))
+            .flatMap { try? JSONDecoder().decode([TextReplacement].self, from: $0) } ?? []
+        var seen = Set<String>()
+        return saved.compactMap { rule in
+            let term = rule.replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty, seen.insert(term.lowercased()).inserted else { return nil }
+            return term
+        }.prefix(50).map { $0 }
     }
 
     func deleteRules(at offsets: IndexSet) {
