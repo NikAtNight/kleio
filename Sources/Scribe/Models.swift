@@ -121,6 +121,9 @@ struct ScribeDocument: Codable, Identifiable, Hashable {
     /// Explicit people retained even before a segment has been assigned to
     /// them. Optional for backward compatibility with existing libraries.
     var knownSpeakers: [String]?
+    /// Cluster-centroid embeddings keyed by the current user-facing speaker
+    /// label. Optional for backward compatibility with existing libraries.
+    var speakerVoiceprints: [String: [Float]]?
     /// Watch-folder jobs can export beside the source automatically once the
     /// queue finishes. Values are `ExportFormat.rawValue` strings.
     var automaticExportDirectory: String?
@@ -165,6 +168,18 @@ struct ScribeDocument: Codable, Identifiable, Hashable {
 
     var hasSpeakerLabels: Bool {
         isMeetingRecording || !availableSpeakerNames.isEmpty
+    }
+
+    mutating func rekeySpeakerVoiceprint(from oldName: String, to newName: String) {
+        guard var voiceprints = speakerVoiceprints,
+              let embedding = voiceprints.removeValue(forKey: oldName) else { return }
+        if let existing = voiceprints[newName], existing.count == embedding.count {
+            let average = zip(existing, embedding).map { ($0 + $1) / 2 }
+            voiceprints[newName] = VoiceProfileStore.normalized(average)
+        } else {
+            voiceprints[newName] = embedding
+        }
+        speakerVoiceprints = voiceprints
     }
 }
 
