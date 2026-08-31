@@ -1,5 +1,5 @@
-// Renders the Scribe app icon: a macOS-style rounded square with an
-// indigo→violet gradient and a white waveform-with-quote motif.
+// Renders the Scribe app icon: a macOS-style rounded square with a
+// deep blue-to-violet gradient and a centered mirrored waveform.
 // Usage: swift generate-icon.swift <output.png> <size>
 import AppKit
 
@@ -27,9 +27,9 @@ if let ctx = NSGraphicsContext.current?.cgContext {
 }
 
 let gradient = NSGradient(colors: [
-    NSColor(calibratedRed: 0.31, green: 0.27, blue: 0.90, alpha: 1),
-    NSColor(calibratedRed: 0.56, green: 0.27, blue: 0.96, alpha: 1),
-    NSColor(calibratedRed: 0.72, green: 0.32, blue: 0.98, alpha: 1),
+    NSColor(calibratedRed: 0.03, green: 0.16, blue: 0.55, alpha: 1),
+    NSColor(calibratedRed: 0.16, green: 0.22, blue: 0.72, alpha: 1),
+    NSColor(calibratedRed: 0.43, green: 0.18, blue: 0.79, alpha: 1),
 ])!
 gradient.draw(in: path, angle: 90)
 
@@ -40,13 +40,13 @@ let highlight = NSGradient(colors: [
 ])!
 highlight.draw(in: path, angle: -90)
 
-// Waveform: symmetric vertical bars, heights shaped like speech.
-let barHeights: [CGFloat] = [0.18, 0.34, 0.62, 0.88, 0.55, 0.72, 0.40, 0.25]
+// Waveform: mirrored Voice Memos-style bars around the centerline.
+let barHeights: [CGFloat] = [0.24, 0.42, 0.66, 0.86, 1.0, 0.86, 0.66, 0.42, 0.24]
 let barCount = barHeights.count
 let waveWidth = rect.width * 0.62
 let barWidth = waveWidth / CGFloat(barCount) * 0.52
 let gap = (waveWidth - barWidth * CGFloat(barCount)) / CGFloat(barCount - 1)
-let maxBarHeight = rect.height * 0.46
+let maxBarHeight = rect.height * 0.48
 let startX = rect.midX - waveWidth / 2
 let midY = rect.midY - rect.height * 0.02
 
