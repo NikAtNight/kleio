@@ -92,8 +92,15 @@ enum Exporter {
     }
 
     private static func plainText(_ doc: ScribeDocument) -> String {
-        doc.segments
-            .map { "[\($0.start.clockString)] \(speakerPrefix($0, in: doc))\($0.text)" }
+        TranscriptTimelineRow.merged(segments: doc.segments, notes: doc.notes ?? [])
+            .map { row in
+                switch row {
+                case .segment(let segment):
+                    return "[\(segment.start.clockString)] \(speakerPrefix(segment, in: doc))\(segment.text)"
+                case .note(let note):
+                    return "[\(note.time.clockString)] Note: \(note.text)"
+                }
+            }
             .joined(separator: "\n")
     }
 
@@ -110,9 +117,14 @@ enum Exporter {
             out += "## Summary\n\n\(summary)\n\n"
         }
         out += "## Transcript\n\n"
-        for seg in doc.segments {
-            let speaker = speakerPrefix(seg, in: doc)
-            out += "**[\(seg.start.clockString)]** \(speaker.isEmpty ? "" : "**\(speaker)**")\(seg.text)\n\n"
+        for row in TranscriptTimelineRow.merged(segments: doc.segments, notes: doc.notes ?? []) {
+            switch row {
+            case .segment(let segment):
+                let speaker = speakerPrefix(segment, in: doc)
+                out += "**[\(segment.start.clockString)]** \(speaker.isEmpty ? "" : "**\(speaker)**")\(segment.text)\n\n"
+            case .note(let note):
+                out += "> **\(note.time.clockString)** \(note.text)\n\n"
+            }
         }
         return out
     }
@@ -124,10 +136,15 @@ enum Exporter {
                 .replacingOccurrences(of: ">", with: "&gt;")
                 .replacingOccurrences(of: "\"", with: "&quot;")
         }
-        let body = doc.segments.map { segment in
-            let speaker = doc.speakerName(for: segment)
-            let speakerHTML = speaker.isEmpty ? "" : "<strong>\(escape(speaker)):</strong> "
-            return "<p><time>\(segment.start.clockString)</time> \(speakerHTML)\(escape(segment.text))</p>"
+        let body = TranscriptTimelineRow.merged(segments: doc.segments, notes: doc.notes ?? []).map { row in
+            switch row {
+            case .segment(let segment):
+                let speaker = doc.speakerName(for: segment)
+                let speakerHTML = speaker.isEmpty ? "" : "<strong>\(escape(speaker)):</strong> "
+                return "<p><time>\(segment.start.clockString)</time> \(speakerHTML)\(escape(segment.text))</p>"
+            case .note(let note):
+                return "<p class=\"note\"><time>\(note.time.clockString)</time> <strong>Note:</strong> \(escape(note.text))</p>"
+            }
         }.joined(separator: "\n")
         let summary = doc.summary.map { "<section><h2>Summary</h2><p>\(escape($0).replacingOccurrences(of: "\n", with: "<br>"))</p></section>" } ?? ""
         return """

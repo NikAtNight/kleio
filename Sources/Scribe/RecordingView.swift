@@ -10,6 +10,7 @@ struct ActiveRecordingView: View {
 
     @State private var pulse = false
     @State private var confirmDiscard = false
+    @State private var noteText = ""
 
     private var activeDocument: ScribeDocument? {
         recording.activeDocumentID.flatMap { library.document(id: $0) }
@@ -73,6 +74,8 @@ struct ActiveRecordingView: View {
 
             controlCluster
 
+            notesArea
+
             Spacer(minLength: 24)
 
             Text("Audio saves to disk continuously. A crash cannot lose it.")
@@ -128,6 +131,47 @@ struct ActiveRecordingView: View {
         } else {
             controlButtons.background(.regularMaterial, in: Capsule())
         }
+    }
+
+    private var notesArea: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Add a note…", text: $noteText)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(addNote)
+
+            if let notes = activeDocument?.notes, !notes.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 5) {
+                        ForEach(notes) { note in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(note.time.clockString)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 48, alignment: .trailing)
+                                Text(note.text)
+                                    .font(.callout)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 110)
+            }
+        }
+        .frame(maxWidth: 520)
+        .padding(.top, 14)
+        .padding(.horizontal, 20)
+    }
+
+    private func addNote() {
+        let text = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty,
+              var document = activeDocument else { return }
+        var notes = document.notes ?? []
+        notes.append(MeetingNote(time: recording.elapsed, text: text))
+        document.notes = notes
+        library.update(document)
+        noteText = ""
     }
 }
 

@@ -30,6 +30,49 @@ struct TranscriptSegment: Codable, Identifiable, Hashable {
     var speaker: String? = nil
 }
 
+/// A user note pinned to a point in a recording or imported file.
+struct MeetingNote: Codable, Identifiable, Hashable {
+    var id: UUID = UUID()
+    var time: TimeInterval
+    var text: String
+}
+
+/// An item in the chronological transcript timeline.
+enum TranscriptTimelineRow: Identifiable, Hashable {
+    case segment(TranscriptSegment)
+    case note(MeetingNote)
+
+    enum ID: Hashable {
+        case segment(UUID)
+        case note(UUID)
+    }
+
+    var id: ID {
+        switch self {
+        case .segment(let segment): return .segment(segment.id)
+        case .note(let note): return .note(note.id)
+        }
+    }
+
+    var time: TimeInterval {
+        switch self {
+        case .segment(let segment): return segment.start
+        case .note(let note): return note.time
+        }
+    }
+
+    static func merged(segments: [TranscriptSegment], notes: [MeetingNote]) -> [Self] {
+        (segments.map(Self.segment) + notes.map(Self.note)).sorted { lhs, rhs in
+            if lhs.time != rhs.time { return lhs.time < rhs.time }
+            switch (lhs, rhs) {
+            case (.segment, .note): return true
+            case (.note, .segment): return false
+            default: return false
+            }
+        }
+    }
+}
+
 /// A single audio file belonging to a document. Recordings in meeting mode
 /// have two tracks (mic + system); imports have one.
 struct AudioTrack: Codable, Hashable {
@@ -86,6 +129,9 @@ struct ScribeDocument: Codable, Identifiable, Hashable {
     /// documents written by older Scribe builds continue to decode.
     var calendarEventID: String?
     var calendarEventTitle: String?
+    /// Optional for backward compatibility with documents written before
+    /// timestamped meeting notes were available.
+    var notes: [MeetingNote]?
 
     var fullText: String {
         segments.map(\.text).joined(separator: " ")
