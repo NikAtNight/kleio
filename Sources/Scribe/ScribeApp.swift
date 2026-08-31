@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UserNotifications
 
 /// Entry point: `Scribe --transcribe <file> [model]` runs a headless
 /// transcription (used by make-app.sh to pre-warm the CoreML cache and by
@@ -103,6 +104,7 @@ struct ScribeApp: App {
     @StateObject private var replacementStore = ReplacementStore()
     @StateObject private var watchFolders = WatchFolderManager()
     @StateObject private var dictation = DictationController()
+    @StateObject private var calendarSync = CalendarSync()
 
     var body: some Scene {
         WindowGroup("Scribe", id: "main") {
@@ -115,6 +117,7 @@ struct ScribeApp: App {
                 .environmentObject(replacementStore)
                 .environmentObject(watchFolders)
                 .environmentObject(dictation)
+                .environmentObject(calendarSync)
                 .onAppear {
                     queue.configure(
                         library: library,
@@ -131,6 +134,8 @@ struct ScribeApp: App {
                         let ids = Importer.importFiles(urls, library: library, queue: queue)
                         if let first = ids.first { appState.selection = first }
                     }
+                    appDelegate.calendarSync = calendarSync
+                    calendarSync.start()
                 }
                 .frame(minWidth: 940, minHeight: 560)
         }
@@ -155,6 +160,7 @@ struct ScribeApp: App {
                 .environmentObject(recording)
                 .environmentObject(appState)
                 .environmentObject(dictation)
+                .environmentObject(calendarSync)
         } label: {
             Image(systemName: recording.isRecording
                   ? "record.circle.fill"
@@ -167,19 +173,32 @@ struct ScribeApp: App {
                 .environmentObject(replacementStore)
                 .environmentObject(watchFolders)
                 .environmentObject(dictation)
+                .environmentObject(calendarSync)
         }
         .restorationBehavior(.disabled)
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     /// Set once by ScribeApp; a direct callback (not a notification) so
     /// files import exactly once no matter how many windows exist.
     var onOpenFiles: (([URL]) -> Void)?
+    weak var calendarSync: CalendarSync?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            let center = UNUserNotificationCenter.current()
+            let join = UNNotificationAction(identifier: "MEETING_JOIN", title: "Join", options: [.foreground])
+            let openScribe = UNNotificationAction(identifier: "MEETING_OPEN_SCRIBE", title: "Open Scribe", options: [.foreground])
+            center.setNotificationCategories([UNNotificationCategory(
+                identifier: "MEETING_START",
+                actions: [join, openScribe],
+                intentIdentifiers: []
+            )])
+            center.delegate = self
+        }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -189,6 +208,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Keep running for the menu bar quick-recorder.
         false
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        if response.actionIdentifier == "MEETING_JOIN" {
+            await MainActor.run {
+                calendarSync?.handleNotificationAction(identifier: response.actionIdentifier, userInfo: response.notification.request.content.userInfo)
+            }
+        } else if response.actionIdentifier == "MEETING_OPEN_SCRIBE" || response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            await MainActor.run {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
     }
 
 }

@@ -30,6 +30,8 @@
 	<string>Scribe records your microphone so your side of calls and voice memos can be transcribed.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Scribe records system audio so the other side of calls (Zoom, Teams, Meet, FaceTime, browser calls) can be transcribed.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Scribe reads your calendar to show upcoming meetings and remind you to record them.</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
