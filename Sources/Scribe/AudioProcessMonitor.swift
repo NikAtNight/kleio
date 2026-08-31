@@ -27,12 +27,21 @@ final class AudioProcessMonitor {
         return Self.hasConferencingProcess(runningBundleIDs: runningBundleIDs, joinURL: event.joinURL)
     }
 
+    func runningConferencingProcessBundleIDs() -> Set<String> {
+        let runningBundleIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        return Self.conferencingProcessBundleIDs(in: runningBundleIDs)
+    }
+
     nonisolated static func hasConferencingProcess(runningBundleIDs: Set<String>, joinURL: URL?) -> Bool {
-        if !runningBundleIDs.isDisjoint(with: nativeConferenceBundleIDs) {
+        if !conferencingProcessBundleIDs(in: runningBundleIDs).isEmpty {
             return true
         }
         guard eventUsesBrowserConference(joinURL) else { return false }
         return !runningBundleIDs.isDisjoint(with: browserBundleIDs)
+    }
+
+    nonisolated static func conferencingProcessBundleIDs(in runningBundleIDs: Set<String>) -> Set<String> {
+        runningBundleIDs.intersection(nativeConferenceBundleIDs)
     }
 
     func startMetering(onLevel: @escaping @Sendable (Float) -> Void) throws {

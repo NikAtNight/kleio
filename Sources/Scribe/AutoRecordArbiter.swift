@@ -60,6 +60,77 @@ enum AutoRecordCommand: Equatable {
     case postOverlap(active: AutoRecordEvent, waiting: AutoRecordEvent)
 }
 
+enum ManualAutoStopCommand: Equatable {
+    case stopRecording
+}
+
+struct ManualAutoStopCore {
+    private var trackedProcessBundleID: String?
+    private var silenceSince: Date?
+    private var pausedAt: Date?
+    private var didRequestStop = false
+
+    mutating func update(
+        now: Date,
+        enabled: Bool,
+        isManualMeetingRecording: Bool,
+        isPaused: Bool,
+        elapsed: TimeInterval,
+        conferencingProcessBundleIDs: Set<String>,
+        systemAudioActive: Bool,
+        micAudioActive: Bool,
+        silenceMinutes: Int
+    ) -> [ManualAutoStopCommand] {
+        guard enabled, isManualMeetingRecording else {
+            reset()
+            return []
+        }
+
+        if isPaused {
+            if pausedAt == nil { pausedAt = now }
+            return []
+        }
+        if let pausedAt {
+            if let silenceSince {
+                self.silenceSince = silenceSince.addingTimeInterval(now.timeIntervalSince(pausedAt))
+            }
+            self.pausedAt = nil
+        }
+
+        if trackedProcessBundleID == nil {
+            trackedProcessBundleID = conferencingProcessBundleIDs.sorted().first
+        }
+
+        if !systemAudioActive && !micAudioActive {
+            if silenceSince == nil { silenceSince = now }
+        } else {
+            silenceSince = nil
+        }
+
+        guard elapsed >= 2 * 60, !didRequestStop else { return [] }
+
+        if let trackedProcessBundleID,
+           !conferencingProcessBundleIDs.contains(trackedProcessBundleID) {
+            didRequestStop = true
+            return [.stopRecording]
+        }
+
+        if let silenceSince,
+           now.timeIntervalSince(silenceSince) >= TimeInterval(silenceMinutes * 60) {
+            didRequestStop = true
+            return [.stopRecording]
+        }
+        return []
+    }
+
+    private mutating func reset() {
+        trackedProcessBundleID = nil
+        silenceSince = nil
+        pausedAt = nil
+        didRequestStop = false
+    }
+}
+
 struct AutoRecordArbiterCore {
     private(set) var phase: AutoRecordPhase = .idle
     private(set) var lastStopReason: AutoRecordStopReason?
@@ -289,6 +360,7 @@ final class AutoRecordArbiter: ObservableObject {
     @Published private(set) var lastProblem: String?
 
     private var core = AutoRecordArbiterCore()
+    private var manualAutoStopCore = ManualAutoStopCore()
     private let processMonitor = AudioProcessMonitor()
     private weak var calendarSync: CalendarSync?
     private weak var recording: RecordingSession?
@@ -363,8 +435,20 @@ final class AutoRecordArbiter: ObservableObject {
             micAudioActive: recording.micLevel > 0.04,
             recordingActive: recording.isRecording
         )
+        let manualCommands = manualAutoStopCore.update(
+            now: now,
+            enabled: UserDefaults.standard.bool(forKey: "manualAutoStopEnabled"),
+            isManualMeetingRecording: isManualMeetingRecording(recording),
+            isPaused: recording.isPaused,
+            elapsed: recording.elapsed,
+            conferencingProcessBundleIDs: processMonitor.runningConferencingProcessBundleIDs(),
+            systemAudioActive: recording.systemLevel > 0.04,
+            micAudioActive: recording.micLevel > 0.04,
+            silenceMinutes: calendarSync.autoRecordSilenceMinutes
+        )
         phase = core.phase
         run(commands)
+        run(manualCommands)
     }
 
     private func run(_ commands: [AutoRecordCommand]) {
@@ -395,6 +479,25 @@ final class AutoRecordArbiter: ObservableObject {
             }
         }
         phase = core.phase
+    }
+
+    private func run(_ commands: [ManualAutoStopCommand]) {
+        for command in commands {
+            switch command {
+            case .stopRecording:
+                guard let recording, let library, let queue, recording.isRecording else { continue }
+                recording.stop(library: library, queue: queue)
+                postManualAutoStopNotification()
+            }
+        }
+    }
+
+    private func isManualMeetingRecording(_ recording: RecordingSession) -> Bool {
+        guard recording.isRecording, recording.activeCalendarEventTitle == nil,
+              let documentID = recording.activeDocumentID,
+              let document = library?.document(id: documentID) else { return false }
+        let sources = Set(document.tracks.map(\.source))
+        return sources.contains(.microphone) && sources.contains(.system)
     }
 
     private func startRecording(for event: AutoRecordEvent) {
@@ -488,6 +591,19 @@ final class AutoRecordArbiter: ObservableObject {
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(
             identifier: "auto-record-problem-\(eventID)",
+            content: content,
+            trigger: nil
+        ))
+    }
+
+    private func postManualAutoStopNotification() {
+        guard isBundledApp else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Recording stopped"
+        content.body = "The call ended."
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(
+            identifier: "manual-auto-stop-\(UUID().uuidString)",
             content: content,
             trigger: nil
         ))
