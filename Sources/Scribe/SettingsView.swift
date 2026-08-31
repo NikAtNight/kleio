@@ -271,6 +271,8 @@ struct GeneralSettings: View {
     @AppStorage("language") private var language = ""
     @AppStorage("translate") private var translate = false
     @AppStorage("automaticSpeakerRecognition") private var automaticSpeakerRecognition = false
+    @AppStorage("preferredInputDeviceUID") private var preferredInputDeviceUID = ""
+    @State private var inputDevices = AudioDevices.inputDevices()
 
     private static let languages: [(code: String, name: String)] = [
         ("", "Auto-detect"), ("en", "English"), ("es", "Spanish"), ("fr", "French"),
@@ -282,6 +284,13 @@ struct GeneralSettings: View {
 
     var body: some View {
         Form {
+            Picker("Microphone:", selection: $preferredInputDeviceUID) {
+                Text(systemDefaultLabel).tag("")
+                ForEach(inputDevices) { device in
+                    Text(device.name).tag(device.uid)
+                }
+            }
+
             Picker("Spoken language:", selection: $language) {
                 ForEach(Self.languages, id: \.code) { lang in
                     Text(lang.name).tag(lang.code)
@@ -312,6 +321,22 @@ struct GeneralSettings: View {
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
+        .onAppear {
+            refreshInputDevices()
+            AudioDevices.observeDeviceChanges { refreshInputDevices() }
+        }
+    }
+
+    private var systemDefaultLabel: String {
+        guard let defaultID = AudioDevices.defaultInputDeviceID(),
+              let device = inputDevices.first(where: { $0.id == defaultID }) else {
+            return "System default"
+        }
+        return "System default (\(device.name))"
+    }
+
+    private func refreshInputDevices() {
+        inputDevices = AudioDevices.inputDevices()
     }
 }
 

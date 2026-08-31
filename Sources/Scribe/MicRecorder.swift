@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
 
 /// Records the default input device (microphone) to a CAF file, writing
 /// progressively so a crash mid-recording loses nothing.
@@ -32,6 +33,7 @@ final class MicRecorder {
     func start(writingTo url: URL, onLevel: @escaping @Sendable (Float) -> Void) throws {
         fileURL = url
         let input = engine.inputNode
+        configurePreferredInputDevice(for: input)
         let format = input.outputFormat(forBus: 0)
         let file = try AVAudioFile(forWriting: url, settings: format.settings)
         audioFile = file
@@ -53,6 +55,30 @@ final class MicRecorder {
 
         engine.prepare()
         try engine.start()
+    }
+
+    private func configurePreferredInputDevice(for input: AVAudioInputNode) {
+        let uid = UserDefaults.standard.string(forKey: "preferredInputDeviceUID") ?? ""
+        let preferredDeviceID = uid.isEmpty ? nil : AudioDevices.deviceID(forUID: uid)
+        guard let audioUnit = input.audioUnit,
+              let deviceID = preferredDeviceID ?? AudioDevices.defaultInputDeviceID() else { return }
+
+        guard setInputDevice(deviceID, on: audioUnit) != noErr,
+              preferredDeviceID != nil,
+              let defaultDeviceID = AudioDevices.defaultInputDeviceID() else { return }
+        _ = setInputDevice(defaultDeviceID, on: audioUnit)
+    }
+
+    private func setInputDevice(_ deviceID: AudioDeviceID, on audioUnit: AudioUnit) -> OSStatus {
+        var deviceID = deviceID
+        return AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
     }
 
     var isPaused: Bool { paused.value }
