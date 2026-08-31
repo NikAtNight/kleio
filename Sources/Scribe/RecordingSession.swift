@@ -99,6 +99,7 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var micHistory: [Float] = []
     @Published private(set) var systemHistory: [Float] = []
     @Published private(set) var activeDocumentID: UUID?
+    @Published private(set) var activeCalendarEventTitle: String?
     @Published var lastError: String?
 
     private var mic: MicRecorder?
@@ -109,7 +110,12 @@ final class RecordingSession: ObservableObject {
     private var micLevelHistory = LevelHistory()
     private var systemLevelHistory = LevelHistory()
 
-    func start(mode: RecordingMode, library: LibraryStore) async {
+    func start(
+        mode: RecordingMode,
+        library: LibraryStore,
+        calendarEvent: AutoRecordEvent? = nil,
+        storeCalendarDetails: Bool = true
+    ) async {
         guard !isRecording else { return }
         lastError = nil
 
@@ -121,9 +127,11 @@ final class RecordingSession: ObservableObject {
         }
 
         var doc = ScribeDocument(
-            title: Self.defaultTitle(for: mode),
+            title: calendarEvent?.title ?? Self.defaultTitle(for: mode),
             kind: .recording,
-            status: .recording
+            status: .recording,
+            calendarEventID: storeCalendarDetails ? calendarEvent?.eventID : nil,
+            calendarEventTitle: storeCalendarDetails ? calendarEvent?.title : nil
         )
         let folder = LibraryStore.folder(for: doc.id)
         do {
@@ -173,6 +181,7 @@ final class RecordingSession: ObservableObject {
         // recording recoverable if the app dies.
         library.add(doc)
         activeDocumentID = doc.id
+        activeCalendarEventTitle = calendarEvent?.title
 
         isRecording = true
         isPaused = false
@@ -256,6 +265,7 @@ final class RecordingSession: ObservableObject {
         systemLevel = 0
         resetLevelHistories()
         activeDocumentID = nil
+        activeCalendarEventTitle = nil
 
         guard var doc = library.document(id: docID) else { return }
         let folder = LibraryStore.folder(for: doc.id)
@@ -282,6 +292,7 @@ final class RecordingSession: ObservableObject {
         systemLevel = 0
         resetLevelHistories()
         activeDocumentID = nil
+        activeCalendarEventTitle = nil
         if let doc = library.document(id: docID) {
             library.delete(doc)
         }

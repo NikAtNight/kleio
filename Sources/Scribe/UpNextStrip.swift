@@ -31,6 +31,17 @@ struct UpNextStrip: View {
                         }
                         .padding(10)
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                        .contextMenu {
+                            if calendarSync.autoRecordIsEnabled(for: meeting) {
+                                Button("Don't auto-record this meeting") {
+                                    calendarSync.setAutoRecordOverride(false, for: meeting.eventID)
+                                }
+                            } else {
+                                Button("Auto-record this meeting") {
+                                    calendarSync.setAutoRecordOverride(true, for: meeting.eventID)
+                                }
+                            }
+                        }
                     }
                 }
             }
