@@ -66,7 +66,7 @@ enum Importer {
         let parentNames = Set(supported.map { $0.deletingLastPathComponent().lastPathComponent })
         let title = parentNames.count == 1
             ? (parentNames.first ?? "Podcast")
-            : "Podcast — \(Date().formatted(date: .abbreviated, time: .shortened))"
+            : "Podcast, \(Date().formatted(date: .abbreviated, time: .shortened))"
         var doc = ScribeDocument(title: title, kind: .imported, status: .queued)
         let folder = LibraryStore.folder(for: doc.id)
         var usedNames: [String: Int] = [:]

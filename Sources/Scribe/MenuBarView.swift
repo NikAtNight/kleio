@@ -49,7 +49,7 @@ struct MenuBarView: View {
         }
 
         if recording.isRecording {
-            Text("Recording — \(recording.elapsed.clockString)")
+            Text("Recording, \(recording.elapsed.clockString)")
             Button(recording.isPaused ? "Resume" : "Pause") {
                 recording.togglePause()
             }

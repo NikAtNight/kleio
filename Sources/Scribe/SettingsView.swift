@@ -7,6 +7,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             ModelSettings()
                 .tabItem { Label("Models", systemImage: "cpu") }
+            CalendarSettingsView()
+                .tabItem { Label("Calendar", systemImage: "calendar") }
             ReplacementSettings()
                 .tabItem { Label("Cleanup", systemImage: "text.badge.checkmark") }
             WatchFolderSettings()

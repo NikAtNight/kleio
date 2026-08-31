@@ -38,9 +38,9 @@ final class DictationController: ObservableObject {
 
     var statusText: String {
         switch phase {
-        case .idle: return lastMessage ?? "Ready — press ⌥Space"
+        case .idle: return lastMessage ?? "Ready. Press ⌥Space"
         case .preparing: return "Preparing microphone…"
-        case .recording: return "Listening — press ⌥Space to finish"
+        case .recording: return "Listening. Press ⌥Space to finish"
         case .transcribing: return "Transcribing dictation…"
         }
     }
@@ -186,7 +186,7 @@ final class DictationController: ObservableObject {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
             phase = .idle
-            lastMessage = "Copied to clipboard — allow Accessibility to paste automatically"
+            lastMessage = "Copied to clipboard. Allow Accessibility to paste automatically"
             return
         }
 

@@ -255,8 +255,8 @@ struct SidebarRow: View {
         case .transcribing:
             let pct = Int(((queue.progress[document.id] ?? 0) * 100).rounded())
             return "Transcribing… \(pct)%"
-        case .failed: return "Failed — \(date)"
-        case .recovered: return "Recovered — needs transcription"
+        case .failed: return "Failed, \(date)"
+        case .recovered: return "Recovered, needs transcription"
         case .ready: return "\(date) · \(document.duration.clockString)"
         }
     }
@@ -300,10 +300,14 @@ struct HomeView: View {
                     .foregroundStyle(.tint)
                 Text("Scribe")
                     .font(.largeTitle.bold())
-                Text("Record calls and meetings, or drop in any audio or video file.\nEverything is transcribed on this Mac — nothing leaves it.")
+                Text("Record calls and meetings, or drop in any audio or video file.\nEverything is transcribed on this Mac. Nothing leaves it.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
             }
+
+            UpNextStrip()
+                .frame(maxWidth: 620)
+                .padding(.horizontal, 32)
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 190), spacing: 14)], spacing: 14) {
                 ForEach(RecordingMode.allCases) { mode in
