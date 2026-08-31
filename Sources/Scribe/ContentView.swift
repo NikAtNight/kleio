@@ -333,84 +333,156 @@ struct SidebarRow: View {
     }
 }
 
-/// Empty-selection home: big action cards, MacWhisper style.
+/// Empty-selection home.
 struct HomeView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var modelManager: ModelManager
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var dictation: DictationController
+    @EnvironmentObject private var calendarSync: CalendarSync
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        VStack(spacing: 28) {
-            Spacer()
-            VStack(spacing: 8) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 44, weight: .medium))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.tint)
-                Text("Scribe")
-                    .font(.largeTitle.bold())
-                Text("Record calls and meetings, or drop in any audio or video file.\nEverything is transcribed on this Mac. Nothing leaves it.")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                header
 
-            UpNextStrip()
-                .frame(maxWidth: 620)
-                .padding(.horizontal, 32)
-
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 190), spacing: 14)], spacing: 14) {
-                ForEach(RecordingMode.allCases) { mode in
-                    ActionCard(icon: mode.icon, title: mode.title, subtitle: mode.subtitle) {
-                        Task { await recording.start(mode: mode, library: library) }
+                if showsUpNext {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Up Next")
+                            .font(.title3.bold())
+                        UpNextStrip()
                     }
-                    .disabled(dictation.phase != .idle)
                 }
-                ActionCard(
-                    icon: "square.and.arrow.down",
-                    title: "Open file",
-                    subtitle: "Transcribe an audio or video file from disk"
-                ) {
-                    appState.presentImporter(.files)
-                }
-                ActionCard(
-                    icon: "person.2.wave.2",
-                    title: "Podcast tracks",
-                    subtitle: "Import one synchronized audio file per speaker"
-                ) {
-                    appState.presentImporter(.podcast)
-                }
-                ActionCard(
-                    icon: "text.cursor",
-                    title: "Dictation",
-                    subtitle: dictation.enabled
-                        ? "Speak into any app with the ⌥Space shortcut"
-                        : "Enable private, system-wide speech-to-text"
-                ) {
-                    if dictation.enabled {
-                        dictation.toggle()
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Recent")
+                        .font(.title3.bold())
+
+                    if recentDocuments.isEmpty {
+                        emptyLibrary
                     } else {
-                        dictation.setEnabled(true, promptForAccessibility: true)
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 220, maximum: 260), spacing: 14)],
+                            spacing: 14
+                        ) {
+                            ForEach(recentDocuments) { document in
+                                RecentDocumentCard(document: document)
+                            }
+                        }
                     }
                 }
-            }
-            .frame(maxWidth: 620)
-            .padding(.horizontal, 32)
 
-            Button {
-                openSettings()
-            } label: {
-                Text("Model: **\(modelDisplayName)** · change in Settings")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Button {
+                        appState.presentImporter(.podcast)
+                    } label: {
+                        Label("Podcast Tracks…", systemImage: "person.2.wave.2")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        if dictation.enabled {
+                            dictation.toggle()
+                        } else {
+                            dictation.setEnabled(true, promptForAccessibility: true)
+                        }
+                    } label: {
+                        Label(
+                            dictation.enabled ? "Dictation On" : "Enable Dictation",
+                            systemImage: "text.cursor"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        openSettings()
+                    } label: {
+                        Text("Model: \(modelDisplayName) · change in Settings")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .buttonStyle(.plain)
-            Spacer()
-            Spacer()
+            .padding(24)
+            .frame(maxWidth: 1_100, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text("Scribe")
+                .font(.largeTitle.bold())
+
+            Spacer(minLength: 24)
+
+            Button {
+                Task { await recording.start(mode: .meeting, library: library) }
+            } label: {
+                Label("Record Meeting", systemImage: "record.circle")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .disabled(dictation.phase != .idle)
+
+            Menu {
+                ForEach([RecordingMode.systemOnly, .microphoneOnly]) { mode in
+                    Button {
+                        Task { await recording.start(mode: mode, library: library) }
+                    } label: {
+                        Label(mode.title, systemImage: mode.icon)
+                    }
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .menuStyle(.borderlessButton)
+            .disabled(dictation.phase != .idle)
+
+            Button {
+                appState.presentImporter(.files)
+            } label: {
+                Label("Open File…", systemImage: "folder")
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private var recentDocuments: [ScribeDocument] {
+        Array(
+            library.documents
+                .filter { $0.status == .ready }
+                .sorted { $0.createdAt > $1.createdAt }
+                .prefix(9)
+        )
+    }
+
+    private var showsUpNext: Bool {
+        calendarSync.isEnabled && calendarSync.upcomingMeetings.contains {
+            Calendar.current.isDateInToday($0.start)
+        }
+    }
+
+    private var emptyLibrary: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "waveform")
+                .font(.system(size: 34, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.tint)
+            Text("No recordings yet")
+                .font(.headline)
+            Text("Record a call or drop in an audio file to get started.")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 52)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var modelDisplayName: String {
@@ -419,56 +491,114 @@ struct HomeView: View {
     }
 }
 
-struct ActionCard: View {
-    let icon: String
-    let title: String
-    let subtitle: String
-    let action: () -> Void
+struct RecentDocumentCard: View {
+    @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var queue: TranscriptionQueue
+    @EnvironmentObject private var appState: AppState
+    let document: ScribeDocument
     @State private var hovering = false
+    @State private var waveformSamples: [Float] = []
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(.tint)
-                    .frame(height: 26)
-                Text(title)
+        Button {
+            appState.selection = document.id
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                waveformThumbnail
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 28)
+                Text(document.title)
                     .font(.headline)
-                    .multilineTextAlignment(.leading)
-                Text(subtitle)
+                    .lineLimit(1)
+                Text("\(document.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(document.duration.clockString)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
+                    .lineLimit(1)
             }
-            .padding(14)
-            .frame(width: 170, height: 150, alignment: .topLeading)
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
             .background { cardSurface }
             .overlay(
-                RoundedRectangle(cornerRadius: 14)
+                RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(hovering ? Color.accentColor.opacity(0.5) : Color.primary.opacity(0.08))
             )
         }
-        .buttonStyle(ActionCardButtonStyle(hovering: hovering))
+        .buttonStyle(RecentDocumentCardButtonStyle(hovering: hovering))
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
+        .task(id: document.id) {
+            let urls = document.tracks.map {
+                LibraryStore.folder(for: document.id).appendingPathComponent($0.fileName)
+            }
+            let samples = await WaveformSampler.samples(for: urls, bucketCount: 1_000)
+            guard !Task.isCancelled else { return }
+            waveformSamples = downsample(samples, to: 96)
+        }
+        .contextMenu {
+            Button("Re-transcribe") { queue.enqueue(document.id) }
+                .disabled(document.status == .transcribing || document.status == .recording)
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([LibraryStore.folder(for: document.id)])
+            }
+            Divider()
+            Button("Delete", role: .destructive) {
+                if appState.selection == document.id { appState.selection = nil }
+                library.delete(document)
+            }
+        }
     }
 
     @ViewBuilder
     private var cardSurface: some View {
         if #available(macOS 26.0, *) {
             Color.clear
-                .glassEffect(in: RoundedRectangle(cornerRadius: 14))
+                .glassEffect(in: RoundedRectangle(cornerRadius: 12))
         } else {
-            RoundedRectangle(cornerRadius: 14)
+            RoundedRectangle(cornerRadius: 12)
                 .fill(hovering ? Color.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor))
+        }
+    }
+
+    private var waveformThumbnail: some View {
+        Canvas { context, size in
+            guard !waveformSamples.isEmpty else { return }
+
+            let barWidth: CGFloat = 1.5
+            let barCount = waveformSamples.count
+            let gap = barCount > 1
+                ? max(1, (size.width - CGFloat(barCount) * barWidth) / CGFloat(barCount - 1))
+                : 0
+            let center = size.height / 2
+
+            for (index, sample) in waveformSamples.enumerated() {
+                let height = max(2, CGFloat(sample) * size.height)
+                let rect = CGRect(
+                    x: CGFloat(index) * (barWidth + gap),
+                    y: center - height / 2,
+                    width: barWidth,
+                    height: height
+                )
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: 0.75),
+                    with: .color(Color(nsColor: .tertiaryLabelColor))
+                )
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func downsample(_ samples: [Float], to bucketCount: Int) -> [Float] {
+        guard samples.count > bucketCount else { return samples }
+
+        return (0..<bucketCount).map { index in
+            let start = index * samples.count / bucketCount
+            let end = max(start + 1, (index + 1) * samples.count / bucketCount)
+            return samples[start..<min(end, samples.count)].max() ?? 0
         }
     }
 }
 
-private struct ActionCardButtonStyle: ButtonStyle {
+private struct RecentDocumentCardButtonStyle: ButtonStyle {
     let hovering: Bool
 
     func makeBody(configuration: Configuration) -> some View {
