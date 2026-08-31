@@ -10,6 +10,7 @@ struct TranscriptView: View {
     @EnvironmentObject private var playback: PlaybackController
     @EnvironmentObject private var replacements: ReplacementStore
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var voiceProfiles = VoiceProfileStore.shared
     let document: ScribeDocument
 
     @State private var title: String = ""
@@ -364,6 +365,7 @@ struct TranscriptView: View {
         guard var doc = library.document(id: document.id),
               let index = doc.segments.firstIndex(where: { $0.id == segmentID }) else { return }
         doc.segments[index].speaker = speaker
+        // A single reassigned segment is not enough evidence to learn a voice.
         if let speaker, !speaker.isEmpty {
             var known = doc.knownSpeakers ?? []
             if !known.contains(speaker) { known.append(speaker) }
@@ -393,6 +395,15 @@ struct TranscriptView: View {
         if !known.contains(newName) { known.append(newName) }
         var seen = Set<String>()
         doc.knownSpeakers = known.filter { seen.insert($0).inserted }
+        if let embedding = doc.speakerVoiceprints?[oldName] {
+            if voiceProfiles.hasProfile(named: oldName) {
+                voiceProfiles.renameProfile(from: oldName, to: newName)
+            }
+            if voiceProfiles.isRecognitionEnabled {
+                voiceProfiles.learn(name: newName, embedding: embedding)
+            }
+            doc.rekeySpeakerVoiceprint(from: oldName, to: newName)
+        }
         library.update(doc)
     }
 
