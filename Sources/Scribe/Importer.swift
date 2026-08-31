@@ -40,7 +40,7 @@ enum Importer {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 try FileManager.default.copyItem(at: url, to: folder.appendingPathComponent(fileName))
             } catch {
-                NSLog("Scribe: import copy failed: %@", error.localizedDescription)
+                DiagLog.log("import copy failed for %@ file: %@", url.pathExtension.lowercased(), error.localizedDescription)
                 continue
             }
             doc.tracks = [AudioTrack(source: .imported, fileName: fileName)]
@@ -87,7 +87,7 @@ enum Importer {
             }
         } catch {
             try? FileManager.default.removeItem(at: folder)
-            NSLog("Scribe: podcast import failed: %@", error.localizedDescription)
+            DiagLog.log("podcast import failed for %d tracks: %@", supported.count, error.localizedDescription)
             return nil
         }
 

@@ -103,7 +103,7 @@ final class LibraryStore: ObservableObject {
             let data = try encoder.encode(doc)
             try data.write(to: folder.appendingPathComponent("document.json"), options: .atomic)
         } catch {
-            NSLog("Scribe: failed to save document %@: %@", doc.id.uuidString, error.localizedDescription)
+            DiagLog.log("failed to save document %@: %@", doc.id.uuidString, error.localizedDescription)
         }
     }
 }

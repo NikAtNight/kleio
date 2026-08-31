@@ -69,6 +69,7 @@ final class TranscriptionQueue: ObservableObject {
         let translate = UserDefaults.standard.bool(forKey: "translate")
         let recognizeSpeakers = UserDefaults.standard.bool(forKey: "automaticSpeakerRecognition")
         let model = modelManager.selectedVariant
+        let startedAt = Date()
 
         do {
             try await transcriber.load(model: model)
@@ -107,7 +108,7 @@ final class TranscriptionQueue: ObservableObject {
                         // Diarization is an enhancement. A missing model or
                         // unsupported audio must never discard a good Whisper
                         // transcript.
-                        NSLog("Scribe: speaker recognition skipped: %@", error.localizedDescription)
+                        DiagLog.log("speaker recognition skipped for document %@: %@", docID.uuidString, error.localizedDescription)
                     }
                 }
                 allSegments.append(contentsOf: segments)
@@ -127,9 +128,23 @@ final class TranscriptionQueue: ObservableObject {
             doc.status = .ready
             doc.modelUsed = model
             doc.language = language.isEmpty ? nil : language
+            DiagLog.log(
+                "transcription completed for document %@ using model %@: %.1fs, %d segments",
+                docID.uuidString,
+                model,
+                Date().timeIntervalSince(startedAt),
+                allSegments.count
+            )
         } catch {
             doc.status = .failed
             doc.failureReason = error.localizedDescription
+            DiagLog.log(
+                "transcription failed for document %@ using model %@ after %.1fs: %@",
+                docID.uuidString,
+                model,
+                Date().timeIntervalSince(startedAt),
+                error.localizedDescription
+            )
         }
 
         progress[docID] = nil
