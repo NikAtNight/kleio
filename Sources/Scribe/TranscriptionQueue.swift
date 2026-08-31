@@ -89,6 +89,7 @@ final class TranscriptionQueue: ObservableObject {
         let language = UserDefaults.standard.string(forKey: "language") ?? ""
         let translate = UserDefaults.standard.bool(forKey: "translate")
         let recognizeSpeakers = UserDefaults.standard.bool(forKey: "automaticSpeakerRecognition")
+        let recognizeKnownVoices = VoiceProfileStore.shared.isRecognitionEnabled
         let model = modelManager.selectedVariant
         let startedAt = Date()
 
@@ -96,6 +97,9 @@ final class TranscriptionQueue: ObservableObject {
             try await transcriber.load(model: model)
 
             var allSegments: [TranscriptSegment] = []
+            var allVoiceprints: [String: [Float]] = [:]
+            var suggestedSpeakers: [String] = []
+            var didDiarize = false
             let folder = LibraryStore.folder(for: doc.id)
             let tracks = doc.tracks
             for (index, track) in tracks.enumerated() {
@@ -123,8 +127,33 @@ final class TranscriptionQueue: ObservableObject {
                     livePreview[docID] = "Recognizing speakers locally…"
                     progress[docID] = base + 0.92 / trackCount
                     do {
-                        let intervals = try await speakerDiarizer.intervals(for: url)
-                        segments = SpeakerDiarizer.assignSpeakers(to: segments, using: intervals)
+                        let diarization = try await speakerDiarizer.intervals(for: url)
+                        didDiarize = true
+                        segments = SpeakerDiarizer.assignSpeakers(
+                            to: segments,
+                            using: diarization.intervals
+                        )
+                        for rawID in diarization.voiceprints.keys.sorted() {
+                            guard let embedding = diarization.voiceprints[rawID],
+                                  let assignedLabel = diarization.speakerLabels[rawID] else { continue }
+                            var finalLabel = assignedLabel
+                            if recognizeKnownVoices,
+                               let match = VoiceProfileStore.shared.match(embedding: embedding) {
+                                switch VoiceProfileStore.matchTier(for: match.distance) {
+                                case .apply:
+                                    finalLabel = match.name
+                                    for segmentIndex in segments.indices
+                                        where segments[segmentIndex].speaker == assignedLabel {
+                                        segments[segmentIndex].speaker = match.name
+                                    }
+                                case .suggest:
+                                    suggestedSpeakers.append(match.name)
+                                case .none:
+                                    break
+                                }
+                            }
+                            Self.addVoiceprint(embedding, for: finalLabel, to: &allVoiceprints)
+                        }
                     } catch {
                         // Diarization is an enhancement. A missing model or
                         // unsupported audio must never discard a good Whisper
@@ -140,10 +169,18 @@ final class TranscriptionQueue: ObservableObject {
                 allSegments = replacementStore.apply(to: allSegments)
             }
             doc.segments = allSegments
+            if didDiarize {
+                doc.speakerVoiceprints = allVoiceprints.isEmpty ? nil : allVoiceprints
+            }
             let detectedSpeakers = allSegments.compactMap(\.speaker).filter { !$0.isEmpty }
             // Detected speakers are real; never cap them. Only the calendar
             // suggestions below are limited.
             doc.knownSpeakers = Self.mergedKnownSpeakers(doc.knownSpeakers, adding: detectedSpeakers, limit: Int.max)
+            doc.knownSpeakers = Self.mergedKnownSpeakers(
+                doc.knownSpeakers,
+                adding: suggestedSpeakers,
+                limit: Int.max
+            )
             if let eventID = doc.calendarEventID {
                 let attendeeNames = attendeeNamesProvider?(eventID) ?? []
                 doc.knownSpeakers = Self.mergedKnownSpeakers(
@@ -183,11 +220,26 @@ final class TranscriptionQueue: ObservableObject {
             fresh.modelUsed = doc.modelUsed
             fresh.language = doc.language
             fresh.failureReason = doc.failureReason
+            fresh.speakerVoiceprints = doc.speakerVoiceprints
             fresh.knownSpeakers = Self.mergedKnownSpeakers(fresh.knownSpeakers, adding: doc.knownSpeakers ?? [], limit: Int.max)
             library.update(fresh)
             if fresh.status == .ready {
                 Exporter.exportAutomaticallyIfNeeded(fresh)
             }
+        }
+    }
+
+    private nonisolated static func addVoiceprint(
+        _ embedding: [Float],
+        for name: String,
+        to voiceprints: inout [String: [Float]]
+    ) {
+        if let existing = voiceprints[name], existing.count == embedding.count {
+            voiceprints[name] = VoiceProfileStore.normalized(
+                zip(existing, embedding).map { ($0 + $1) / 2 }
+            )
+        } else {
+            voiceprints[name] = embedding
         }
     }
 }

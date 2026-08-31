@@ -320,9 +320,11 @@ struct WatchFolderSettings: View {
 }
 
 struct GeneralSettings: View {
+    @ObservedObject private var voiceProfiles = VoiceProfileStore.shared
     @AppStorage("language") private var language = ""
     @AppStorage("translate") private var translate = false
     @AppStorage("automaticSpeakerRecognition") private var automaticSpeakerRecognition = false
+    @AppStorage(VoiceProfileStore.voiceRecognitionEnabledKey) private var voiceRecognitionEnabled = true
     @AppStorage("preferredInputDeviceUID") private var preferredInputDeviceUID = ""
     @AppStorage("manualAutoStopEnabled") private var manualAutoStopEnabled = false
     @State private var inputDevices = AudioDevices.inputDevices()
@@ -363,6 +365,38 @@ struct GeneralSettings: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Known Voices") {
+                Toggle("Recognize known voices", isOn: $voiceRecognitionEnabled)
+
+                if voiceProfiles.profiles.isEmpty {
+                    Text("No known voices yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(voiceProfiles.profiles) { profile in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(profile.name)
+                                Text(profileSummary(profile))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Delete", role: .destructive) {
+                                voiceProfiles.delete(name: profile.name)
+                            }
+                        }
+                    }
+                }
+
+                Button("Learn from Library") {}
+                    .disabled(true)
+                    .help("Coming soon")
+
+                Text("Voice fingerprints are numeric summaries stored only on this Mac. Deleting a known voice removes its fingerprints permanently. Learning from existing library items is coming soon.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Recording") {
                 Toggle("End meeting recordings when the call ends", isOn: $manualAutoStopEnabled)
 
@@ -386,6 +420,11 @@ struct GeneralSettings: View {
             refreshInputDevices()
             AudioDevices.observeDeviceChanges { refreshInputDevices() }
         }
+    }
+
+    private func profileSummary(_ profile: VoiceProfile) -> String {
+        let samples = profile.sampleCount == 1 ? "1 sample" : "\(profile.sampleCount) samples"
+        return "\(samples) · Updated \(profile.updatedAt.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private var systemDefaultLabel: String {
