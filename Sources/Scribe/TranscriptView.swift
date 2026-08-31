@@ -57,23 +57,24 @@ struct TranscriptView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             TextField("Title", text: $title)
                 .textFieldStyle(.plain)
                 .font(.title2.bold())
                 .onSubmit(commitTitle)
 
-            HStack(spacing: 6) {
-                Text(document.createdAt.formatted(date: .abbreviated, time: .shortened))
-                Text("·")
-                Text(document.duration.clockString)
+            HStack(spacing: 8) {
+                metadataItem(document.createdAt.formatted(date: .abbreviated, time: .shortened))
+                metadataItem(document.duration.clockString)
                 if let model = document.modelUsed {
-                    Text("·")
-                    Text(ModelManager.catalog.first { $0.variant == model }?.displayName ?? model)
+                    metadataItem(ModelManager.catalog.first { $0.variant == model }?.displayName ?? model)
                 }
                 if document.isMeetingRecording {
-                    Text("·")
                     Label("Meeting", systemImage: "person.2.wave.2")
+                        .font(.caption)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color.secondary.opacity(0.12)))
                 }
                 Spacer()
                 TextField("Find in transcript", text: $transcriptSearch)
@@ -88,7 +89,6 @@ struct TranscriptView: View {
                 .keyboardShortcut("f", modifiers: [.command, .shift])
                 .help("Find and replace")
             }
-            .font(.callout)
             .foregroundStyle(.secondary)
 
             if showFindReplace { findReplaceBar }
@@ -101,21 +101,29 @@ struct TranscriptView: View {
                 }
                 .padding(.top, 4)
             } else if let summary = document.summary, !summary.isEmpty {
-                DisclosureGroup {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Summary", systemImage: "sparkles")
+                        .font(.callout.bold())
+                    // LocalizedStringKey keeps the AI summary's markdown rendering.
                     Text(LocalizedStringKey(summary))
                         .font(.callout)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 4)
-                } label: {
-                    Label("Summary", systemImage: "sparkles")
-                        .font(.callout.bold())
                 }
-                .padding(.top, 4)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
             }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
+    }
+
+    private func metadataItem(_ text: String) -> some View {
+        Text(text)
+            .font(.callout)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.secondary.opacity(0.08)))
     }
 
     private var segmentList: some View {
@@ -224,12 +232,14 @@ struct TranscriptView: View {
             }
         }
         .font(.callout)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
         .padding(.top, 4)
     }
 
     private var peopleBar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 8) {
                 Label("People", systemImage: "person.2")
                     .font(.callout.bold())
                 Text("Click a speaker badge on any segment to assign it.")
@@ -254,7 +264,7 @@ struct TranscriptView: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
         .padding(.top, 4)
     }
 
@@ -453,7 +463,16 @@ struct SegmentRow: View {
     }
 
     private var speakerColor: Color {
-        segment.source == .microphone ? .blue : .purple
+        switch speakerName {
+        case "You": return .blue
+        case "Them": return .purple
+        default:
+            let palette: [Color] = [.blue, .purple, .green, .orange, .pink, .teal]
+            let value = speakerName.unicodeScalars.reduce(UInt64(5_381)) { partial, scalar in
+                (partial &* 33) &+ UInt64(scalar.value)
+            }
+            return palette[Int(value % UInt64(palette.count))]
+        }
     }
 }
 
@@ -461,6 +480,7 @@ struct SegmentRow: View {
 struct PlayerBar: View {
     @EnvironmentObject private var playback: PlaybackController
     let document: ScribeDocument
+    @State private var waveformSamples: [Float] = []
 
     private static let rates: [Float] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -487,13 +507,12 @@ struct PlayerBar: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 56, alignment: .trailing)
 
-            Slider(
-                value: Binding(
-                    get: { playback.currentTime },
-                    set: { playback.seek(to: $0) }
-                ),
-                in: 0...max(playback.duration, 0.1)
+            StaticWaveformView(
+                samples: waveformSamples,
+                progress: playback.duration > 0 ? playback.currentTime / playback.duration : 0,
+                onSeek: { playback.seek(to: $0 * playback.duration) }
             )
+            .frame(height: 44)
 
             Text(playback.duration.clockString)
                 .font(.callout.monospacedDigit())
@@ -523,6 +542,13 @@ struct PlayerBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.bar)
+        .task(id: document.id) {
+            waveformSamples = []
+            let urls = document.tracks.map {
+                LibraryStore.folder(for: document.id).appendingPathComponent($0.fileName)
+            }
+            waveformSamples = await WaveformSampler.samples(for: urls)
+        }
     }
 
     private func rateLabel(_ rate: Float) -> String {
