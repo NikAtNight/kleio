@@ -19,15 +19,36 @@ final class TranscriptionQueue: ObservableObject {
     private weak var library: LibraryStore?
     private weak var modelManager: ModelManager?
     private weak var replacementStore: ReplacementStore?
+    private var attendeeNamesProvider: ((String) -> [String])?
 
     func configure(
         library: LibraryStore,
         modelManager: ModelManager,
-        replacementStore: ReplacementStore
+        replacementStore: ReplacementStore,
+        attendeeNamesProvider: ((String) -> [String])? = nil
     ) {
         self.library = library
         self.modelManager = modelManager
         self.replacementStore = replacementStore
+        self.attendeeNamesProvider = attendeeNamesProvider
+    }
+
+    nonisolated static func mergedKnownSpeakers(
+        _ existing: [String]?,
+        adding names: [String],
+        limit: Int = 8
+    ) -> [String] {
+        var merged: [String] = []
+        var seen = Set<String>()
+        for name in (existing ?? []) + names {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            guard seen.insert(key).inserted else { continue }
+            merged.append(trimmed)
+            if merged.count == limit { break }
+        }
+        return merged
     }
 
     func enqueue(_ docID: UUID) {
@@ -120,10 +141,16 @@ final class TranscriptionQueue: ObservableObject {
             }
             doc.segments = allSegments
             let detectedSpeakers = allSegments.compactMap(\.speaker).filter { !$0.isEmpty }
-            if !detectedSpeakers.isEmpty {
-                var known = doc.knownSpeakers ?? []
-                for speaker in detectedSpeakers where !known.contains(speaker) { known.append(speaker) }
-                doc.knownSpeakers = known
+            // Detected speakers are real; never cap them. Only the calendar
+            // suggestions below are limited.
+            doc.knownSpeakers = Self.mergedKnownSpeakers(doc.knownSpeakers, adding: detectedSpeakers, limit: Int.max)
+            if let eventID = doc.calendarEventID {
+                let attendeeNames = attendeeNamesProvider?(eventID) ?? []
+                doc.knownSpeakers = Self.mergedKnownSpeakers(
+                    doc.knownSpeakers,
+                    adding: attendeeNames,
+                    limit: max(8, (doc.knownSpeakers ?? []).count)
+                )
             }
             doc.status = .ready
             doc.modelUsed = model
@@ -156,6 +183,7 @@ final class TranscriptionQueue: ObservableObject {
             fresh.modelUsed = doc.modelUsed
             fresh.language = doc.language
             fresh.failureReason = doc.failureReason
+            fresh.knownSpeakers = Self.mergedKnownSpeakers(fresh.knownSpeakers, adding: doc.knownSpeakers ?? [], limit: Int.max)
             library.update(fresh)
             if fresh.status == .ready {
                 Exporter.exportAutomaticallyIfNeeded(fresh)

@@ -324,6 +324,7 @@ struct GeneralSettings: View {
     @AppStorage("translate") private var translate = false
     @AppStorage("automaticSpeakerRecognition") private var automaticSpeakerRecognition = false
     @AppStorage("preferredInputDeviceUID") private var preferredInputDeviceUID = ""
+    @AppStorage("manualAutoStopEnabled") private var manualAutoStopEnabled = false
     @State private var inputDevices = AudioDevices.inputDevices()
 
     private static let languages: [(code: String, name: String)] = [
@@ -358,6 +359,14 @@ struct GeneralSettings: View {
 
             if automaticSpeakerRecognition {
                 Text("Speaker recognition runs after Whisper for imports, mic recordings, and remote meeting audio. The first run downloads an additional local model; transcription still succeeds if diarization cannot run.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Recording") {
+                Toggle("End meeting recordings when the call ends", isOn: $manualAutoStopEnabled)
+
+                Text("Applies to recordings you start yourself. Scribe stops after the meeting app closes or both sides stay silent for a few minutes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -58,6 +58,40 @@ enum MeetingDetector {
     }
 }
 
+struct CalendarAttendee: Equatable {
+    let displayName: String?
+    let isResource: Bool
+    let isCurrentUser: Bool
+}
+
+enum AttendeeNameFormatter {
+    static func names(from attendees: [CalendarAttendee], limit: Int = 8) -> [String] {
+        var names: [String] = []
+        var seen = Set<String>()
+
+        for attendee in attendees where !attendee.isResource && !attendee.isCurrentUser {
+            guard let name = formattedName(attendee.displayName) else { continue }
+            guard seen.insert(name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)).inserted else {
+                continue
+            }
+            names.append(name)
+            if names.count == limit { break }
+        }
+        return names
+    }
+
+    static func formattedName(_ displayName: String?) -> String? {
+        guard let displayName else { return nil }
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+
+        let parts = name.split(whereSeparator: { $0.isWhitespace })
+        guard parts.count > 1, name.count > 20 || parts.count > 2 else { return name }
+        guard let first = parts.first, let last = parts.last, let initial = last.first else { return name }
+        return "\(first) \(initial.uppercased())"
+    }
+}
+
 @MainActor
 final class CalendarSync: NSObject, ObservableObject {
     static let syncEnabledKey = "calendarSyncEnabled"
@@ -278,6 +312,21 @@ final class CalendarSync: NSObject, ObservableObject {
               let rawURL = userInfo["joinURL"] as? String,
               let url = URL(string: rawURL) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func attendeeNames(forEventID eventID: String) -> [String] {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess,
+              let event = eventStore.event(withIdentifier: eventID) else {
+            return []
+        }
+        let attendees = (event.attendees ?? []).map {
+            CalendarAttendee(
+                displayName: $0.name,
+                isResource: $0.participantType == .resource,
+                isCurrentUser: $0.isCurrentUser
+            )
+        }
+        return AttendeeNameFormatter.names(from: attendees)
     }
 
     private func enableAndRefresh() async {

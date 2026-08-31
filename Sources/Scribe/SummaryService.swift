@@ -48,10 +48,13 @@ enum SummaryService {
     }
 
     static let defaultPrompt = """
-    Summarize this transcript. Structure your answer as:
-    1. TL;DR (one or two sentences)
-    2. Key points (bullets)
-    3. Decisions and action items (bullets; say "none" if there are none)
+    Summarize this transcript in Markdown. Use exactly these sections:
+    ## Summary
+    Write 2-4 tight sentences.
+    ## Action items
+    Use `- [ ] owner: task` lines. Omit this section if there are none.
+    ## Decisions
+    Use bullets. Omit this section if there are none.
     """
 
     static var provider: Provider {

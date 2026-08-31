@@ -30,6 +30,13 @@ struct TranscriptView: View {
         return document.segments.filter { $0.text.lowercased().contains(query) }
     }
 
+    private var timelineRows: [TranscriptTimelineRow] {
+        TranscriptTimelineRow.merged(
+            segments: visibleSegments,
+            notes: document.notes ?? []
+        )
+    }
+
     private var activeSegmentID: UUID? {
         guard playback.documentID == document.id else { return nil }
         let time = playback.currentTime
@@ -138,31 +145,43 @@ struct TranscriptView: View {
     private var segmentList: some View {
         ScrollViewReader { proxy in
             List {
-                ForEach(visibleSegments) { segment in
-                    SegmentRow(
-                        segment: segment,
-                        speakerName: document.speakerName(for: segment),
-                        availableSpeakers: document.availableSpeakerNames,
-                        showSpeaker: document.hasSpeakerLabels,
-                        isActive: segment.id == activeSegmentID,
-                        highlight: transcriptSearch,
-                        onSeek: { playback.seek(to: segment.start) },
-                        onEdit: { newText in commitSegmentEdit(segment.id, text: newText) },
-                        onSpeakerChange: { speaker in commitSpeakerChange(segment.id, speaker: speaker) }
-                    )
-                    .id(segment.id)
-                    .listRowSeparator(.hidden)
+                ForEach(timelineRows) { row in
+                    switch row {
+                    case .segment(let segment):
+                        SegmentRow(
+                            segment: segment,
+                            speakerName: document.speakerName(for: segment),
+                            availableSpeakers: document.availableSpeakerNames,
+                            showSpeaker: document.hasSpeakerLabels,
+                            isActive: segment.id == activeSegmentID,
+                            highlight: transcriptSearch,
+                            onSeek: { playback.seek(to: segment.start) },
+                            onEdit: { newText in commitSegmentEdit(segment.id, text: newText) },
+                            onSpeakerChange: { speaker in commitSpeakerChange(segment.id, speaker: speaker) }
+                        )
+                        .id(segment.id)
+                        .listRowSeparator(.hidden)
+                    case .note(let note):
+                        MeetingNoteRow(
+                            note: note,
+                            onSeek: { playback.seek(to: note.time) },
+                            onEdit: { newText in commitNoteEdit(note.id, text: newText) },
+                            onDelete: { deleteNote(note.id) }
+                        )
+                        .id(note.id)
+                        .listRowSeparator(.hidden)
+                    }
                 }
             }
             .listStyle(.plain)
             .overlay {
-                if document.segments.isEmpty {
+                if document.segments.isEmpty && (document.notes ?? []).isEmpty {
                     ContentUnavailableView(
                         "No speech detected",
                         systemImage: "waveform.slash",
                         description: Text("The audio didn't contain any recognizable speech.")
                     )
-                } else if visibleSegments.isEmpty {
+                } else if timelineRows.isEmpty {
                     ContentUnavailableView.search(text: transcriptSearch)
                 }
             }
@@ -320,6 +339,20 @@ struct TranscriptView: View {
                     .caseInsensitiveCompare(correction.right) == .orderedSame
             })
         }
+    }
+
+    private func commitNoteEdit(_ noteID: UUID, text: String) {
+        guard var doc = library.document(id: document.id),
+              let index = doc.notes?.firstIndex(where: { $0.id == noteID }),
+              doc.notes?[index].text != text else { return }
+        doc.notes?[index].text = text
+        library.update(doc)
+    }
+
+    private func deleteNote(_ noteID: UUID) {
+        guard var doc = library.document(id: document.id) else { return }
+        doc.notes?.removeAll { $0.id == noteID }
+        library.update(doc)
     }
 
     private func dismissCorrectionSuggestion() {
@@ -518,6 +551,66 @@ struct SegmentRow: View {
             }
             return palette[Int(value % UInt64(palette.count))]
         }
+    }
+}
+
+struct MeetingNoteRow: View {
+    let note: MeetingNote
+    let onSeek: () -> Void
+    let onEdit: (String) -> Void
+    let onDelete: () -> Void
+
+    @State private var text = ""
+    @State private var isEditing = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Button(action: onSeek) {
+                Text(note.time.clockString)
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .help("Jump playback here")
+            .frame(width: 56, alignment: .trailing)
+
+            Image(systemName: "pencil.line")
+                .foregroundStyle(Color.accentColor)
+
+            if isEditing {
+                TextField("Note", text: $text, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .focused($focused)
+                    .onSubmit(commitEdit)
+                    .onChange(of: focused) { _, isFocused in
+                        if !isFocused { commitEdit() }
+                    }
+            } else {
+                Text(LocalizedStringKey(note.text))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.vertical, 7)
+        .padding(.horizontal, 8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.10)))
+        .contextMenu {
+            Button("Edit") {
+                isEditing = true
+                DispatchQueue.main.async { focused = true }
+            }
+            Button("Delete", role: .destructive, action: onDelete)
+        }
+        .onAppear { text = note.text }
+        .onChange(of: note.text) { _, newValue in
+            if !focused { text = newValue }
+        }
+    }
+
+    private func commitEdit() {
+        onEdit(text)
+        isEditing = false
     }
 }
 
