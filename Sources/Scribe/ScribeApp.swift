@@ -123,7 +123,8 @@ struct ScribeApp: App {
                     queue.configure(
                         library: library,
                         modelManager: modelManager,
-                        replacementStore: replacementStore
+                        replacementStore: replacementStore,
+                        attendeeNamesProvider: calendarSync.attendeeNames(forEventID:)
                     )
                     watchFolders.configure(library: library, queue: queue)
                     dictation.configure(
