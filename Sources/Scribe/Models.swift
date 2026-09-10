@@ -1,7 +1,7 @@
 import Foundation
 
-/// Where a piece of audio came from. Recordings label microphone audio "You"
-/// and system-tap audio "Them" so call transcripts read like a dialogue.
+/// The recorded source stays independent of speaker identities and display names.
+/// Source labels are fallbacks for documents written before speaker detection.
 enum AudioSource: String, Codable, Hashable {
     case microphone
     case system
@@ -28,6 +28,37 @@ struct TranscriptSegment: Codable, Identifiable, Hashable {
     /// two-track meeting recordings and to no label for ordinary imports.
     /// Optional keeps documents written by earlier Scribe builds decodable.
     var speaker: String? = nil
+    var speakerID: UUID? = nil
+    var words: [TranscriptWord]? = nil
+}
+
+struct TranscriptWord: Codable, Hashable {
+    var start: TimeInterval
+    var end: TimeInterval
+    var text: String
+    var probability: Float? = nil
+}
+
+struct DocumentSpeaker: Codable, Identifiable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+    var isMicrophone: Bool = false
+    var savedPersonID: UUID? = nil
+}
+
+struct SpeakerAssignment: Codable, Hashable {
+    var segmentID: UUID
+    var speakerID: UUID
+}
+
+enum SpeakerAnalysisStatus: String, Codable {
+    case notRequested, running, complete, failed
+}
+
+struct VideoTrack: Codable, Hashable {
+    var fileName: String
+    var startOffset: TimeInterval
+    var duration: TimeInterval
 }
 
 /// A user note pinned to a point in a recording or imported file.
@@ -82,6 +113,7 @@ struct AudioTrack: Codable, Hashable {
     /// Podcast imports use one track per person. Transcription copies this
     /// label to every segment decoded from the track.
     var speakerName: String? = nil
+    var startOffset: TimeInterval? = nil
 }
 
 enum DocumentStatus: String, Codable {
@@ -135,6 +167,21 @@ struct ScribeDocument: Codable, Identifiable, Hashable {
     /// Optional for backward compatibility with documents written before
     /// timestamped meeting notes were available.
     var notes: [MeetingNote]?
+    var speakers: [DocumentSpeaker]?
+    var detectedSpeakers: [DocumentSpeaker]?
+    var detectedSpeakerAssignments: [SpeakerAssignment]?
+    var speakerEditsApplied: Bool?
+    var speakerAnalysisStatus: SpeakerAnalysisStatus?
+    var speakerAnalysisError: String?
+    var speakerModelUsed: String?
+    var rawSegments: [TranscriptSegment]?
+    var microphoneSpeakerName: String?
+    var expectedRemoteSpeakerCount: Int?
+    var recordingAppBundleID: String?
+    var recordingAppName: String?
+    var videoTracks: [VideoTrack]?
+    var recoveredAt: Date?
+    var transcriptionWarning: String?
 
     var fullText: String {
         segments.map(\.text).joined(separator: " ")
@@ -147,6 +194,13 @@ struct ScribeDocument: Codable, Identifiable, Hashable {
     var isAutoRecording: Bool { calendarEventID != nil }
 
     func speakerName(for segment: TranscriptSegment) -> String {
+        if kind == .recording, segment.source == .microphone {
+            return microphoneSpeakerName ?? segment.source.speakerLabel
+        }
+        if let id = segment.speakerID,
+           let person = speakers?.first(where: { $0.id == id }) {
+            return person.name
+        }
         if let speaker = segment.speaker?.trimmingCharacters(in: .whitespacesAndNewlines),
            !speaker.isEmpty {
             return speaker

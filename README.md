@@ -1,84 +1,54 @@
 # Scribe
 
-A native macOS transcription app — a MacWhisper-style tool built for reliability. Records
-calls from **any** app (Zoom, Teams, Meet, FaceTime, browser tabs — anything that plays
-audio), transcribes locally with Whisper, and never loses a recording to a crash.
+A native macOS meeting recorder with local transcription and speaker review. Requires macOS 15 or later. Recording, transcription, and speaker detection run on the Mac; models need a one-time download.
 
-## Features
+## Recording and review
 
-- **Meeting recording** — captures your microphone and system audio simultaneously
-  with a live scrolling waveform per side; transcripts label the two sides
-  **You** / **Them** like a dialogue.
-- **System-audio or mic-only modes** for one-sided captures and voice memos.
-- **Calendar-aware** — reads your Apple Calendar (optional), shows today's meetings
-  on the home screen, and notifies you before each one with a Join shortcut.
-- **Auto call recording (optional, off by default)** — arms at a meeting's start
-  time, confirms a call is actually happening (conferencing app plus real audio),
-  then records after a visible 10-second countdown you can cancel. Per-calendar
-  opt-in, per-event overrides, and a consent explainer up front. Everything stays
-  on the Mac; see `docs/auto-record-plan.md` for the design.
-- **Crash-safe by design** — audio streams to disk continuously (CAF format survives an
-  unfinalized write). If the app dies mid-call, the recording shows up as *Recovered* on
-  next launch, ready to transcribe.
-- **File transcription** — drag & drop (or ⌘O, or Finder → Open With) any audio/video
-  file; batch imports queue automatically.
-- **System-wide dictation** — press ⌥Space in any app, speak with a floating
-  waveform HUD for feedback, then press it again; Scribe transcribes locally and
-  inserts the result at the cursor, restoring your clipboard afterward (or copies
-  the text when Accessibility access has not been granted). Optional local cleanup
-  normalizes the dictation with Apple Intelligence or an Ollama model
-  (`scripts/setup-s1-mini.sh` registers the recommended one).
-- **Podcast / multi-track transcription** — import one synchronized file per participant;
-  filenames seed editable speaker names and the tracks become one chronological dialogue.
-- **Automatic speaker recognition (optional)** — a second on-device Core ML diarization
-  pass detects speakers in ordinary imports, mic recordings, and remote meeting audio;
-  labels remain editable and transcription still succeeds if diarization is unavailable.
-- **Local Whisper models** — tiny → large-v3-turbo via WhisperKit (CoreML, Apple Silicon
-  optimized). Download/switch/delete in Settings → Models. Seeds its first model from
-  LocalFlow's cache if present.
-- **Transcript editor** — timestamped segments, click a timestamp to seek, a seekable
-  waveform scrubber, playback follows along with highlighting, inline text editing,
-  find/replace, editable speaker names and assignments, and adjustable speed
-  (0.75×–2×).
-- **Automatic cleanup** — optional filler-word removal plus reusable whole-word/case-aware
-  replacement rules for names and terms Whisper commonly mishears. Editing a
-  transcript offers to turn your correction into a rule, and saved rules bias
-  Whisper toward your vocabulary on future transcriptions.
-- **Watch folders** — automatically queue stable media files added to selected folders and
-  export finished TXT, Markdown, HTML, SRT, or VTT files beside the source.
-- **Export** — TXT, Markdown, HTML, SRT, VTT, CSV, JSON, or copy to clipboard.
-- **AI summaries (optional)** — fully local via Apple Intelligence (macOS 26+) or
-  Ollama, or bring your own Anthropic/OpenAI key in Settings → AI. With a local
-  provider, nothing ever leaves the Mac.
-- **Microphone picker** — choose an input device in Settings → General; hot-plug
-  aware, falls back to the system default when a device disappears.
-- **Menu bar quick-record** — start/stop a recording without opening the main window.
+- **App shortcuts:** capture a selected app's audio plus your microphone. Add Zoom, Teams, Slack, a browser, or another installed app. Browser capture includes all audible tabs. A failed app target never switches to all system audio.
+- **Optional native video:** turn video on, then choose a window or display with the macOS picker. ScreenCaptureKit writes H.264 video alongside separate microphone and app audio. Audio, video, notes, pause/resume, and transcript seeking share a timeline.
+- **Fixed microphone identity:** your microphone is always you. Set your display name and input device in Settings. Choose **One other person** to assign all remote speech to one person without running a speaker model.
+- **Local speaker grouping:** Community-1 is the default, with automatic counting or a supplied participant count. Sortformer v2.1 is an experimental alternative for a declared two to four remote participants. Its count setting checks eligibility; it does not force an exact number of groups. Download speaker models in Settings → Models.
+- **Speaker correction:** click a remote name to rename it or choose a saved person. Use the ellipsis or context menu to merge labels, or combine all remote labels with **Only one other person**. Undo restores assignments without replacing transcript edits. Corrections never train or rename global voice profiles.
+- **Separate analysis state:** speaker analysis can fail while the transcript remains available. Retry speaker analysis without retranscribing or replacing your corrections. Uncertain audio is labelled for review.
+- **Recoverable media:** audio is written progressively to CAF, with an atomic document manifest saved before capture begins. Video uses a fragmented MOV and is finalized before transcription or normal quit. Capture and save errors are visible. Recovery depends on the media actually saved; it is not a guarantee against every crash or disk failure.
+- **Native interface:** grouped light/dark surfaces, saved app shortcuts, recent recordings, a people inspector, and recording controls that remain accessible while browsing.
 
-## Build & install
+## Other features
 
-```bash
-./scripts/make-app.sh --install   # builds, signs, pre-warms CoreML, installs to /Applications
+- Microphone-only voice memos and an explicit all-Mac-audio recording mode.
+- Drag and drop, file import, batch transcription, and podcast participant tracks.
+- Local Whisper models through WhisperKit, with download, selection, and deletion in Settings.
+- Timestamped transcript editing, search/replace, waveform seeking, playback speed, and meeting notes.
+- Export to TXT, Markdown, HTML, SRT, VTT, CSV, JSON, or the clipboard.
+- Optional Calendar integration and automatic call recording with a visible countdown. See [the auto-record plan](docs/auto-record-plan.md).
+- System-wide dictation with ⌥Space, optional local cleanup, and reusable replacement rules.
+- Watch folders with automatic transcription and export.
+- Optional summaries through Apple Intelligence or Ollama locally, or a cloud provider explicitly configured in Settings → AI.
+
+## Build and verify
+
+```sh
+swift test --disable-automatic-resolution
+swift build -c release --disable-automatic-resolution
 ```
 
-On first launch grant **Microphone** and **System Audio Recording** when prompted.
-For automatic dictation insertion, also enable Scribe under **System Settings → Privacy &
-Security → Accessibility**. Dictation still works without this permission and copies its
-result to the clipboard.
+To package the app using the existing signing and model pre-warming script:
 
-## Architecture notes
+```sh
+./scripts/make-app.sh
+```
 
-- SwiftUI + SPM executable target, bundled by `scripts/make-app.sh`, signed with the
-  "Talix Dev Signing" identity so TCC grants survive rebuilds.
-- System audio capture: Core Audio **process tap** (`AudioHardwareCreateProcessTap`,
-  macOS 14.4+) with a global stereo mixdown excluding Scribe itself, hosted in a private
-  aggregate device. Needs only the "System Audio Recording" permission — no screen
-  recording permission.
-- Transcription: [WhisperKit](https://github.com/argmaxinc/WhisperKit); models live in
-  `~/Library/Application Support/Scribe/models/` (deliberately not ~/Documents — iCloud
-  eviction corrupts model caches).
-- Speaker recognition: [FluidAudio](https://github.com/FluidInference/FluidAudio)'s offline
-  Core ML diarization pipeline; its models are lazy-loaded only when the feature is enabled.
-- Library: one folder per document under
-  `~/Library/Application Support/Scribe/library/<uuid>/` — `document.json` + audio files.
-- `Scribe --transcribe <file> [model]` runs headless transcription (used for CoreML
-  pre-warming and testing).
+That script creates `build/Scribe.app`. Its `--install` option replaces the installed app in `/Applications` and relaunches it.
+
+Grant Microphone and System Audio Recording access when recording. Video uses the native screen-sharing picker and the corresponding macOS permission flow. Dictation insertion also needs Accessibility access; otherwise it copies the result to the clipboard.
+
+The automated tests cover domain behavior and generated media. Real meeting accuracy, app/process behavior, permission flows, Bluetooth transitions, and long video sessions still need native acceptance testing. See [the validation checklist](docs/meeting-recorder-validation.md) and [implementation evidence](docs/flows/meeting-recording.md).
+
+## Storage and implementation
+
+- SwiftUI and AppKit, built as a Swift Package executable.
+- Core Audio process taps select app/helper processes. ScreenCaptureKit and AVAssetWriter handle optional video. `RecordingClock` and `TimelineAudioWriter` keep both audio sources aligned and preserve interruptions as silence.
+- [WhisperKit](https://github.com/argmaxinc/WhisperKit) handles local transcription; [FluidAudio](https://github.com/FluidInference/FluidAudio) supplies Core ML speaker models. Speaker analysis never downloads models implicitly.
+- Each library document lives in `~/Library/Application Support/Scribe/library/<uuid>/`, with `document.json` and its media files. Optional manifest fields preserve compatibility with older documents.
+- Saved people are local names, independent of the legacy voice-profile store. Original media and raw transcription remain available through speaker corrections.
+- `Scribe --transcribe <file> [model]` runs headless transcription.

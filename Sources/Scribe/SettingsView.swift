@@ -320,11 +320,11 @@ struct WatchFolderSettings: View {
 }
 
 struct GeneralSettings: View {
-    @ObservedObject private var voiceProfiles = VoiceProfileStore.shared
     @AppStorage("language") private var language = ""
     @AppStorage("translate") private var translate = false
     @AppStorage("automaticSpeakerRecognition") private var automaticSpeakerRecognition = false
-    @AppStorage(VoiceProfileStore.voiceRecognitionEnabledKey) private var voiceRecognitionEnabled = true
+    @AppStorage("microphoneSpeakerName") private var microphoneName = "Me"
+    @AppStorage("expectedRemoteSpeakerCount") private var speakerCount = 0
     @AppStorage("preferredInputDeviceUID") private var preferredInputDeviceUID = ""
     @AppStorage("manualAutoStopEnabled") private var manualAutoStopEnabled = false
     @State private var inputDevices = AudioDevices.inputDevices()
@@ -356,45 +356,14 @@ struct GeneralSettings: View {
             Toggle("Translate to English", isOn: $translate)
                 .help("Transcribe non-English audio directly into English text")
 
-            Toggle("Recognize speakers automatically", isOn: $automaticSpeakerRecognition)
-                .help("Runs a second, fully local diarization pass. Additional Core ML models download on first use.")
-
-            if automaticSpeakerRecognition {
-                Text("Speaker recognition runs after Whisper for imports, mic recordings, and remote meeting audio. The first run downloads an additional local model; transcription still succeeds if diarization cannot run.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Known Voices") {
-                Toggle("Recognize known voices", isOn: $voiceRecognitionEnabled)
-
-                if voiceProfiles.profiles.isEmpty {
-                    Text("No known voices yet.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(voiceProfiles.profiles) { profile in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(profile.name)
-                                Text(profileSummary(profile))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("Delete", role: .destructive) {
-                                voiceProfiles.delete(name: profile.name)
-                            }
-                        }
-                    }
-                }
-
-                Button("Learn from Library") {}
-                    .disabled(true)
-                    .help("Coming soon")
-
-                Text("Voice fingerprints are numeric summaries stored only on this Mac. Deleting a known voice removes its fingerprints permanently. Learning from existing library items is coming soon.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Section("Speakers") {
+                TextField("My microphone name:", text: $microphoneName)
+                RemoteSpeakerCountPicker(selection: $speakerCount)
+                Text("Meeting recordings keep your microphone separate and detect the other speakers. Choose one other person to skip speaker-count guessing.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Also detect speakers in imported files", isOn: $automaticSpeakerRecognition)
+                Text("Rename and merge people in a transcript. Saved names stay on this Mac; corrections never change a voice fingerprint.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Recording") {
@@ -411,7 +380,7 @@ struct GeneralSettings: View {
                 }
             }
 
-            Text("Transcription runs entirely on this Mac. Audio and transcripts never leave your machine unless you use AI summaries.")
+            Text("Recording, transcription, and speaker detection run locally. AI summaries use the provider you select in AI settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -420,11 +389,6 @@ struct GeneralSettings: View {
             refreshInputDevices()
             AudioDevices.observeDeviceChanges { refreshInputDevices() }
         }
-    }
-
-    private func profileSummary(_ profile: VoiceProfile) -> String {
-        let samples = profile.sampleCount == 1 ? "1 sample" : "\(profile.sampleCount) samples"
-        return "\(samples) · Updated \(profile.updatedAt.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private var systemDefaultLabel: String {
@@ -451,12 +415,64 @@ struct ModelSettings: View {
                 }
             }
             .listStyle(.inset)
-            .frame(height: 380)
+            .frame(minHeight: 180)
+
+            SpeakerModelSettings()
+                .padding(.horizontal, 16)
 
             Text("Larger models are more accurate but slower. Small (English) is a good default for calls; Large v3 Turbo is the accuracy sweet spot on Apple Silicon.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(12)
+        }
+    }
+}
+
+struct SpeakerModelSettings: View {
+    @AppStorage("speakerDetectionModel") private var selectedModel = "community1"
+    @State private var downloading = false
+    @State private var ready = false
+    @State private var error: String?
+
+    private var model: SpeakerDetectionModel {
+        SpeakerDetectionModel(rawValue: selectedModel) ?? .community1
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            HStack {
+                Picker("Speaker detection", selection: $selectedModel) {
+                    Text("Community-1").tag("community1")
+                    Text("Sortformer · experimental").tag("sortformer")
+                }
+                Spacer()
+                if downloading {
+                    ProgressView().controlSize(.small)
+                } else if ready {
+                    Label("Ready offline", systemImage: "checkmark.circle").foregroundStyle(.secondary)
+                } else {
+                    Button("Download") {
+                        downloading = true
+                        error = nil
+                        Task {
+                            do { try await SpeakerDiarizer().prepareModels(for: model) }
+                            catch { self.error = error.localizedDescription }
+                            ready = SpeakerDiarizer.modelsReady(for: model)
+                            downloading = false
+                        }
+                    }
+                }
+            }.disabled(downloading)
+            Text(model == .sortformer
+                 ? "Experimental option for 2 to 4 other participants. It may still split voices; the chosen count does not force an exact number of groups. Use Community-1 for automatic counting or larger calls."
+                 : "Local speaker grouping for meetings and imported audio. A known participant count helps prevent false splits.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+        }
+        .onChange(of: selectedModel, initial: true) { _, _ in
+            ready = SpeakerDiarizer.modelsReady(for: model)
+            error = nil
         }
     }
 }

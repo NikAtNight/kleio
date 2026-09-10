@@ -30,6 +30,10 @@ final class MicRecorder {
     private var runtimeObserver: NSObjectProtocol?
     private var deviceDisconnectObserver: NSObjectProtocol?
     private var audioFile: AVAudioFile?
+    private var timelineWriter: TimelineAudioWriter?
+    private var onError: (@Sendable (String) -> Void)?
+    private var onWarning: (@Sendable (String) -> Void)?
+    private var writeFailed = false
     private var onLevel: (@Sendable (Float) -> Void)?
     private var recordingActive = false
     private var captureGeneration = 0
@@ -45,18 +49,21 @@ final class MicRecorder {
         }
     }
 
-    func start(writingTo url: URL, onLevel: @escaping @Sendable (Float) -> Void) throws {
+    func start(writingTo url: URL, clock: RecordingClock? = nil, onError: (@Sendable (String) -> Void)? = nil, onWarning: (@Sendable (String) -> Void)? = nil, onLevel: @escaping @Sendable (Float) -> Void) throws {
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             throw MicError.permissionDenied
         }
 
         try controlQueue.sync {
-            let file = try AVAudioFile(
-                forWriting: url,
-                settings: MicAudioProcessing.targetFormat.settings
-            )
+            if let clock {
+                timelineWriter = try TimelineAudioWriter(url: url, format: MicAudioProcessing.targetFormat, clock: clock)
+            } else {
+                audioFile = try AVAudioFile(forWriting: url, settings: MicAudioProcessing.targetFormat.settings)
+            }
+            self.onError = onError
+            self.onWarning = onWarning
+            writeFailed = false
             fileURL = url
-            audioFile = file
             self.onLevel = onLevel
             paused.value = false
             stateLock.lock()
@@ -72,6 +79,9 @@ final class MicRecorder {
                 stateLock.unlock()
                 tearDownCapture()
                 audioFile = nil
+                timelineWriter?.finish()
+                timelineWriter = nil
+                self.onError = nil
                 self.onLevel = nil
                 fileURL = nil
                 if error is MicError { throw error }
@@ -94,7 +104,11 @@ final class MicRecorder {
             tearDownCapture()
             sampleQueue.sync {}
             audioFile = nil
+            timelineWriter?.finish()
+            timelineWriter = nil
             onLevel = nil
+            onError = nil
+            onWarning = nil
         }
     }
 
@@ -115,8 +129,11 @@ final class MicRecorder {
         session.addInput(input)
 
         let output = AVCaptureAudioDataOutput()
-        let forwarder = MicSampleForwarder(targetFormat: MicAudioProcessing.targetFormat) { [weak self] buffer in
-            self?.write(buffer, from: generation)
+        let forwarder = MicSampleForwarder(targetFormat: MicAudioProcessing.targetFormat, hostTime: { [weak session] timestamp in
+            guard let clock = session?.synchronizationClock else { return nil }
+            return CMSyncConvertTime(timestamp, from: clock, to: CMClockGetHostTimeClock()).seconds
+        }) { [weak self] buffer, hostTime in
+            self?.write(buffer, hostTime: hostTime, from: generation)
         }
         output.setSampleBufferDelegate(forwarder, queue: sampleQueue)
         guard session.canAddOutput(output) else { throw MicError.deviceUnavailable }
@@ -223,7 +240,7 @@ final class MicRecorder {
                 // Keep the CAF file and recording state alive. A later runtime
                 // retry can resume after a route transition or device replug.
                 self.tearDownCapture()
-                NSLog("Scribe: microphone recovery failed: %@", error.localizedDescription)
+                self.onWarning?("Microphone disconnected. Reconnect it or select another input. Capture will retry; the timeline keeps the missing interval.")
                 self.scheduleRecoveryRetry()
             }
         }
@@ -267,18 +284,20 @@ final class MicRecorder {
         forwarder = nil
     }
 
-    private func write(_ buffer: AVAudioPCMBuffer, from generation: Int) {
+    private func write(_ buffer: AVAudioPCMBuffer, hostTime: TimeInterval, from generation: Int) {
         stateLock.lock()
         let shouldWrite = recordingActive && generation == captureGeneration && !paused.value
         stateLock.unlock()
-        guard shouldWrite, buffer.frameLength > 0, let audioFile else { return }
+        guard shouldWrite, buffer.frameLength > 0, !writeFailed else { return }
 
         do {
             // This is the durability boundary: every capture buffer reaches
             // the CAF file before any derived level update is delivered.
-            try audioFile.write(from: buffer)
+            if let timelineWriter { try timelineWriter.write(buffer, hostTime: hostTime) }
+            else { try audioFile?.write(from: buffer) }
         } catch {
-            NSLog("Scribe: mic write failed: %@", error.localizedDescription)
+            writeFailed = true
+            onError?("Microphone audio could not be saved. \(error.localizedDescription)")
             return
         }
 
@@ -383,15 +402,17 @@ enum MicAudioProcessing {
 /// when the ASBD changes tolerates Bluetooth profile and sample-rate flips.
 private final class MicSampleForwarder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     private let targetFormat: AVAudioFormat
-    private let onPCM: (AVAudioPCMBuffer) -> Void
+    private let onPCM: (AVAudioPCMBuffer, TimeInterval) -> Void
+    private let hostTime: (CMTime) -> TimeInterval?
     private var sourceDescription: AudioStreamBasicDescription?
     private var sourceFormat: AVAudioFormat?
     private var converter: AVAudioConverter?
     private var rawBuffer: AVAudioPCMBuffer?
     private var convertedBuffer: AVAudioPCMBuffer?
 
-    init(targetFormat: AVAudioFormat, onPCM: @escaping (AVAudioPCMBuffer) -> Void) {
+    init(targetFormat: AVAudioFormat, hostTime: @escaping (CMTime) -> TimeInterval?, onPCM: @escaping (AVAudioPCMBuffer, TimeInterval) -> Void) {
         self.targetFormat = targetFormat
+        self.hostTime = hostTime
         self.onPCM = onPCM
     }
 
@@ -456,7 +477,8 @@ private final class MicSampleForwarder: NSObject, AVCaptureAudioDataOutputSample
             return
         }
         guard converted.frameLength > 0 else { return }
-        onPCM(converted)
+        guard let timestamp = hostTime(sampleBuffer.presentationTimeStamp), timestamp.isFinite else { return }
+        onPCM(converted, timestamp)
     }
 
     private static func matches(

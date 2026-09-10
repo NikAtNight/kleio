@@ -122,7 +122,7 @@ final class DictationController: ObservableObject {
     }
 
     private func startRecording() {
-        guard recordingSession?.isRecording != true else {
+        guard recordingSession?.isBusy != true else {
             lastMessage = "Finish the active recording before starting dictation"
             return
         }
@@ -133,6 +133,11 @@ final class DictationController: ObservableObject {
             guard await MicRecorder.requestPermission() else {
                 phase = .idle
                 lastMessage = MicRecorder.MicError.permissionDenied.localizedDescription
+                return
+            }
+            guard phase == .preparing, recordingSession?.isBusy != true else {
+                phase = .idle
+                lastMessage = "Finish the active recording before starting dictation"
                 return
             }
             do {

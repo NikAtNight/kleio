@@ -74,14 +74,7 @@ actor Transcriber {
         // saved terms here keeps the prompt current without changing its API.
         setVocabulary(ReplacementStore.vocabularyTerms())
 
-        var options = DecodingOptions()
-        options.task = translate ? .translate : .transcribe
-        options.temperature = 0
-        if let language, !language.isEmpty {
-            options.language = language
-        } else if loadedModel?.hasSuffix(".en") == true {
-            options.language = "en"
-        }
+        var options = Self.decodingOptions(language: language, translate: translate, model: loadedModel)
         options.promptTokens = vocabularyTokens
 
         let duration = max(audioDuration(of: url), 0.1)
@@ -103,6 +96,19 @@ actor Transcriber {
         if cancelFlag.isSet { throw TranscriberError.cancelled }
 
         return Self.segments(from: results, source: source)
+    }
+
+    nonisolated static func decodingOptions(language: String?, translate: Bool, model: String?) -> DecodingOptions {
+        let selectedLanguage = language?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedLanguage = selectedLanguage.flatMap { $0.isEmpty ? nil : $0 }
+            ?? (model?.hasSuffix(".en") == true ? "en" : nil)
+        return DecodingOptions(
+            task: translate ? .translate : .transcribe,
+            language: resolvedLanguage,
+            temperature: 0,
+            detectLanguage: resolvedLanguage == nil,
+            wordTimestamps: true
+        )
     }
 
     private func refreshVocabularyTokens() {
@@ -127,7 +133,7 @@ actor Transcriber {
         return Double(token) ?? 0
     }
 
-    static func segments(from results: [TranscriptionResult], source: AudioSource) -> [TranscriptSegment] {
+    nonisolated static func segments(from results: [TranscriptionResult], source: AudioSource) -> [TranscriptSegment] {
         var out: [TranscriptSegment] = []
         for result in results {
             for seg in result.segments {
@@ -137,7 +143,15 @@ actor Transcriber {
                     start: TimeInterval(seg.start),
                     end: TimeInterval(seg.end),
                     text: text,
-                    source: source
+                    source: source,
+                    words: seg.words?.compactMap { word in
+                        let clean = stripSpecialTokens(from: word.word)
+                        guard !clean.isEmpty else { return nil }
+                        // Keep the leading space Whisper uses to join words.
+                        let prefix = String(word.word.prefix(while: { $0.isWhitespace }))
+                        return TranscriptWord(start: TimeInterval(word.start), end: TimeInterval(word.end),
+                                              text: prefix + clean, probability: word.probability)
+                    }
                 ))
             }
         }
@@ -146,7 +160,7 @@ actor Transcriber {
 
     /// Whisper emits inline special tokens like <|startoftranscript|> and
     /// timestamp tokens <|0.00|>, plus bracketed noise markers.
-    static func stripSpecialTokens(from text: String) -> String {
+    nonisolated static func stripSpecialTokens(from text: String) -> String {
         var result = text
         let patterns = [
             "<\\|[^|]*\\|>",

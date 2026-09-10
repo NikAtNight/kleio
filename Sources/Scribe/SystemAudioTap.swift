@@ -3,13 +3,8 @@ import AVFoundation
 import CoreAudio
 import AudioToolbox
 
-/// Captures ALL system audio output (Zoom, Teams, Meet, FaceTime, browsers —
-/// anything that plays sound) via a Core Audio process tap on macOS 14.4+.
-/// Scribe's own process is excluded so playback inside the app can never
-/// feed back into a recording.
-///
-/// Audio is written progressively to a CAF file: CAF tolerates an
-/// unfinalized data chunk, so a crash mid-recording loses nothing.
+/// Captures selected application processes, or all system output when explicitly requested.
+/// Progressive CAF writes preserve completed buffers if the app is interrupted.
 final class SystemAudioTap {
     enum TapError: LocalizedError {
         case osStatus(String, OSStatus)
@@ -29,6 +24,8 @@ final class SystemAudioTap {
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var audioFile: AVAudioFile?
+    private var timelineWriter: TimelineAudioWriter?
+    private var tapDescription: CATapDescription?
     private var format: AVAudioFormat?
     private let writeQueue = DispatchQueue(label: "app.talix.scribe.systemtap")
     private let paused = AtomicBool()
@@ -43,17 +40,21 @@ final class SystemAudioTap {
 
     private(set) var fileURL: URL?
 
-    func start(writingTo url: URL, onLevel: @escaping @Sendable (Float) -> Void) throws {
-        try start(writingTo: Optional(url), onLevel: onLevel)
+    func start(writingTo url: URL, processes: [AudioObjectID]? = nil, clock: RecordingClock? = nil,
+               onError: (@Sendable (String) -> Void)? = nil, onLevel: @escaping @Sendable (Float) -> Void) throws {
+        do { try start(writingTo: Optional(url), processes: processes, clock: clock, onError: onError, onLevel: onLevel) }
+        catch { stop(); throw error }
     }
 
     /// Starts the Core Audio tap for level confirmation only. No file is
     /// created and no audio buffers are retained.
     func startMetering(onLevel: @escaping @Sendable (Float) -> Void) throws {
-        try start(writingTo: nil, onLevel: onLevel)
+        do { try start(writingTo: nil, processes: nil, clock: nil, onError: nil, onLevel: onLevel) }
+        catch { stop(); throw error }
     }
 
-    private func start(writingTo url: URL?, onLevel: @escaping @Sendable (Float) -> Void) throws {
+    private func start(writingTo url: URL?, processes: [AudioObjectID]?, clock: RecordingClock?,
+                       onError: (@Sendable (String) -> Void)?, onLevel: @escaping @Sendable (Float) -> Void) throws {
         fileURL = url
 
         // Exclude our own process from the global tap.
@@ -61,7 +62,10 @@ final class SystemAudioTap {
         if let own = Self.processObject(for: ProcessInfo.processInfo.processIdentifier) {
             excluded = [own]
         }
-        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
+        if let processes, processes.isEmpty { throw TapError.badFormat }
+        let description = processes.map { CATapDescription(stereoMixdownOfProcesses: $0) }
+            ?? CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
+        tapDescription = description
         description.name = "Scribe System Audio Tap"
         description.isPrivate = true
 
@@ -115,7 +119,9 @@ final class SystemAudioTap {
         // The tap delivers interleaved float32; AVAudioFile's default
         // processing format is de-interleaved, and ExtAudioFileWrite errors
         // (-50) on the mismatch — declare interleaved explicitly.
-        if let url {
+        if let url, let clock {
+            timelineWriter = try TimelineAudioWriter(url: url, format: tapFormat, clock: clock)
+        } else if let url {
             audioFile = try AVAudioFile(
                 forWriting: url,
                 settings: tapFormat.settings,
@@ -126,7 +132,7 @@ final class SystemAudioTap {
 
         let pausedFlag = paused
         var levelCounter = 0
-        try check(AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, writeQueue) { [weak self] _, inInputData, _, _, _ in
+        try check(AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, writeQueue) { [weak self] _, inInputData, inputTime, _, _ in
             guard let self else { return }
             self.callbackCount.increment()
             if self.firstBufferDescription.isEmpty {
@@ -150,14 +156,21 @@ final class SystemAudioTap {
                 self.firstBufferDescription += " frameLength=\(buffer.frameLength) capacity=\(buffer.frameCapacity)"
             }
             guard buffer.frameLength > 0 else { return }
-            if let file = self.audioFile {
+            if self.audioFile != nil || self.timelineWriter != nil {
                 do {
-                    try file.write(from: buffer)
+                    guard self.firstWriteError.isEmpty else { return }
+                    if let writer = self.timelineWriter {
+                        let timestamp = inputTime.pointee
+                        guard timestamp.mFlags.contains(.hostTimeValid) else {
+                            throw TapError.badFormat
+                        }
+                        try writer.write(buffer, hostTime: AVAudioTime.seconds(forHostTime: timestamp.mHostTime))
+                    } else { try self.audioFile?.write(from: buffer) }
                     self.writesOK.increment()
                 } catch {
                     if self.firstWriteError.isEmpty {
                         self.firstWriteError = "\(error)"
-                        DiagLog.log("system audio tap write failed: %@", error.localizedDescription)
+                        onError?("App audio could not be saved. \(error.localizedDescription)")
                     }
                 }
             }
@@ -184,8 +197,25 @@ final class SystemAudioTap {
         }
         ioProcID = nil
         // Ensure pending writes land before the file is closed.
-        writeQueue.sync { self.audioFile = nil }
+        writeQueue.sync {
+            self.audioFile = nil
+            self.timelineWriter?.finish()
+            self.timelineWriter = nil
+        }
         cleanup()
+    }
+
+    /// Refresh only the selected application's process list when helpers start or restart.
+    func updateProcesses(_ processes: [AudioObjectID]) throws {
+        guard !processes.isEmpty, let description = tapDescription, tapID != kAudioObjectUnknown else { return }
+        description.processes = processes
+        var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyDescription,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        let status = withUnsafePointer(to: description) { pointer in
+            AudioObjectSetPropertyData(tapID, &address, 0, nil,
+                UInt32(MemoryLayout<CATapDescription>.size), pointer)
+        }
+        guard status == noErr else { throw TapError.osStatus("update selected app", status) }
     }
 
     private func cleanup() {
@@ -202,7 +232,6 @@ final class SystemAudioTap {
     private func check(_ status: OSStatus, _ stage: String) throws {
         guard status == noErr else {
             DiagLog.log("system audio tap failed at %@: status %d", stage, status)
-            cleanup()
             throw TapError.osStatus(stage, status)
         }
     }

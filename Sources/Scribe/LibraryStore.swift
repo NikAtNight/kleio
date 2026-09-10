@@ -2,108 +2,147 @@ import Foundation
 import SwiftUI
 import AVFoundation
 
-/// Persistent library of documents. Each document lives in its own folder:
-/// ~/Library/Application Support/Scribe/library/<uuid>/
-///   document.json + one or more audio files.
-/// Folder-per-document means a crash can never corrupt more than the one
-/// item being written, and audio written progressively during recording
-/// survives even if document.json never got its final save.
+/// Each document owns a folder containing an atomic manifest and progressive media files.
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published private(set) var documents: [ScribeDocument] = []
+    @Published var lastError: String?
+    @Published private(set) var pendingRecordingSaveIDs: Set<UUID> = []
 
-    static let baseURL: URL = {
-        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Scribe/library", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }()
+    nonisolated static let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Scribe/library", isDirectory: true)
+    let storageURL: URL
 
     static func folder(for id: UUID) -> URL {
         baseURL.appendingPathComponent(id.uuidString, isDirectory: true)
     }
 
-    func url(for track: AudioTrack, in doc: ScribeDocument) -> URL {
-        Self.folder(for: doc.id).appendingPathComponent(track.fileName)
+    func folder(for id: UUID) -> URL {
+        storageURL.appendingPathComponent(id.uuidString, isDirectory: true)
     }
 
-    init() {
+    func url(for track: AudioTrack, in doc: ScribeDocument) -> URL {
+        folder(for: doc.id).appendingPathComponent(track.fileName)
+    }
+
+    init(baseURL: URL = LibraryStore.baseURL) {
+        storageURL = baseURL
         load()
+        let loadError = lastError
         recoverCrashedRecordings()
+        lastError = loadError ?? lastError
     }
 
     private func load() {
-        let fm = FileManager.default
-        var docs: [ScribeDocument] = []
-        let folders = (try? fm.contentsOfDirectory(at: Self.baseURL, includingPropertiesForKeys: nil)) ?? []
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        for folder in folders {
-            let jsonURL = folder.appendingPathComponent("document.json")
-            guard let data = try? Data(contentsOf: jsonURL),
-                  let doc = try? decoder.decode(ScribeDocument.self, from: data) else { continue }
-            docs.append(doc)
-        }
-        documents = docs.sorted { $0.createdAt > $1.createdAt }
+        let folders = (try? FileManager.default.contentsOfDirectory(at: storageURL, includingPropertiesForKeys: nil)) ?? []
+        documents = folders.compactMap { folder in
+            let json = folder.appendingPathComponent("document.json")
+            guard FileManager.default.fileExists(atPath: json.path) else {
+                let children = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+                if children.contains(where: { ["caf", "wav", "m4a", "mov", "mp4"].contains($0.pathExtension.lowercased()) }) {
+                    lastError = "A recording has media but no document.json. Its files remain in \(folder.path)."
+                }
+                return nil
+            }
+            do { return try decoder.decode(ScribeDocument.self, from: Data(contentsOf: json)) }
+            catch {
+                lastError = "A recording could not be opened. Its files remain in \(folder.path). \(error.localizedDescription)"
+                return nil
+            }
+        }.sorted { $0.createdAt > $1.createdAt }
     }
 
-    /// A document still marked .recording/.transcribing on launch means the
-    /// app died mid-flight. The progressively-written audio is intact on
-    /// disk — keep it and flag it so the user can (re)transcribe.
     private func recoverCrashedRecordings() {
-        for var doc in documents where doc.status == .recording || doc.status == .transcribing || doc.status == .queued {
-            let folder = Self.folder(for: doc.id)
-            // Drop tracks whose file never materialized.
-            doc.tracks = doc.tracks.filter {
-                FileManager.default.fileExists(atPath: folder.appendingPathComponent($0.fileName).path)
-            }
-            if doc.tracks.isEmpty {
-                delete(doc)
-                continue
-            }
+        for var doc in documents where doc.status == .ready && doc.speakerAnalysisStatus == .running {
+            doc.speakerAnalysisStatus = .failed
+            doc.speakerAnalysisError = "Speaker analysis was interrupted. Retry speaker analysis to continue."
+            update(doc)
+        }
+        for var doc in documents where [.recording, .transcribing, .queued].contains(doc.status) {
+            let folder = folder(for: doc.id)
+            // Keep missing track references in the manifest so a failed capture is diagnosable.
+            doc.duration = max(doc.duration, doc.tracks.map {
+                ($0.startOffset ?? 0) + audioDuration(of: folder.appendingPathComponent($0.fileName))
+            }.max() ?? 0)
             doc.status = .recovered
-            doc.duration = doc.tracks
-                .map { audioDuration(of: folder.appendingPathComponent($0.fileName)) }
-                .max() ?? 0
+            doc.recoveredAt = doc.recoveredAt ?? Date()
+            doc.failureReason = "Recording was interrupted. Available audio and video have been kept. Review the files before retrying transcription."
             update(doc)
         }
     }
 
-    func add(_ doc: ScribeDocument) {
-        documents.insert(doc, at: 0)
-        documents.sort { $0.createdAt > $1.createdAt }
-        save(doc)
+    @discardableResult
+    func add(_ doc: ScribeDocument) -> Bool { update(doc) }
+
+    /// Publish only after the atomic save succeeds. Callers can retain a pending edit on failure.
+    @discardableResult
+    func update(_ doc: ScribeDocument) -> Bool {
+        do {
+            let folder = folder(for: doc.id)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(doc).write(to: folder.appendingPathComponent("document.json"), options: .atomic)
+            if let index = documents.firstIndex(where: { $0.id == doc.id }) {
+                documents[index] = doc
+            } else {
+                documents.append(doc)
+            }
+            documents.sort { $0.createdAt > $1.createdAt }
+            lastError = nil
+            return true
+        } catch {
+            lastError = "Could not save \(doc.title). \(error.localizedDescription)"
+            return false
+        }
     }
 
-    func update(_ doc: ScribeDocument) {
-        if let i = documents.firstIndex(where: { $0.id == doc.id }) {
-            documents[i] = doc
-        } else {
-            documents.insert(doc, at: 0)
+    /// A finished capture must stop looking active even if its final manifest cannot be saved.
+    /// Keep the old crash marker on disk, expose the preserved media, and block deletion until retry.
+    @discardableResult
+    func finalizeRecording(_ doc: ScribeDocument) -> Bool {
+        if update(doc) {
+            pendingRecordingSaveIDs.remove(doc.id)
+            return true
         }
-        save(doc)
+        guard let index = documents.firstIndex(where: { $0.id == doc.id }) else { return false }
+        var recovered = doc
+        recovered.status = .recovered
+        recovered.recoveredAt = recovered.recoveredAt ?? Date()
+        recovered.failureReason = "The recording stopped, but its final details have not been saved. " + (lastError ?? "Retry saving.")
+        documents[index] = recovered
+        pendingRecordingSaveIDs.insert(doc.id)
+        return false
     }
 
     func document(id: UUID) -> ScribeDocument? {
         documents.first { $0.id == id }
     }
 
-    func delete(_ doc: ScribeDocument) {
-        documents.removeAll { $0.id == doc.id }
-        try? FileManager.default.removeItem(at: Self.folder(for: doc.id))
-    }
-
-    private func save(_ doc: ScribeDocument) {
-        let folder = Self.folder(for: doc.id)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
+    @discardableResult
+    func delete(_ doc: ScribeDocument) -> Bool {
+        guard !pendingRecordingSaveIDs.contains(doc.id) else {
+            lastError = "Retry saving this stopped recording before deleting it."
+            return false
+        }
+        guard document(id: doc.id)?.status != .recording else {
+            lastError = "Stop the recording before deleting it."
+            return false
+        }
         do {
-            let data = try encoder.encode(doc)
-            try data.write(to: folder.appendingPathComponent("document.json"), options: .atomic)
+            let folder = folder(for: doc.id)
+            if FileManager.default.fileExists(atPath: folder.path) {
+                try FileManager.default.removeItem(at: folder)
+            }
+            documents.removeAll { $0.id == doc.id }
+            lastError = nil
+            return true
         } catch {
-            DiagLog.log("failed to save document %@: %@", doc.id.uuidString, error.localizedDescription)
+            lastError = "Could not delete \(doc.title). \(error.localizedDescription)"
+            return false
         }
     }
 }

@@ -27,15 +27,15 @@ struct ActiveRecordingView: View {
     private var waveformLanes: [LiveWaveformLane] {
         if recordsMic && recordsSystem {
             return [
-                LiveWaveformLane(label: "You", history: recording.micHistory, color: .blue),
-                LiveWaveformLane(label: "Them", history: recording.systemHistory, color: .purple),
+                LiveWaveformLane(label: activeDocument?.microphoneSpeakerName ?? "Me", history: recording.micHistory, color: .blue),
+                LiveWaveformLane(label: "Other participants", history: recording.systemHistory, color: .purple),
             ]
         }
         if recordsMic {
-            return [LiveWaveformLane(label: "You", history: recording.micHistory, color: .accentColor)]
+            return [LiveWaveformLane(label: activeDocument?.microphoneSpeakerName ?? "Me", history: recording.micHistory, color: .accentColor)]
         }
         if recordsSystem {
-            return [LiveWaveformLane(label: "Them", history: recording.systemHistory, color: .accentColor)]
+            return [LiveWaveformLane(label: "Other participants", history: recording.systemHistory, color: .accentColor)]
         }
         return []
     }
@@ -70,9 +70,20 @@ struct ActiveRecordingView: View {
                 pulse = !isPaused
             }
 
-            Text(recording.isPaused ? "Paused" : (activeDocument?.title ?? "Recording"))
+            Text(recording.isFinalizing ? "Finishing media…" : recording.isPaused ? "Paused" : (activeDocument?.title ?? "Recording"))
                 .foregroundStyle(.secondary)
                 .padding(.top, 6)
+
+            HStack(spacing: 16) {
+                if recordsSystem {
+                    Label(activeDocument?.recordingAppName ?? "All Mac audio", systemImage: "app.badge.waveform")
+                }
+                if activeDocument?.videoTracks?.isEmpty == false {
+                    Label("Video on", systemImage: "video.fill")
+                }
+            }
+            .font(.callout).foregroundStyle(.secondary)
+            .padding(.top, 8)
 
             Spacer(minLength: 30)
 
@@ -82,12 +93,19 @@ struct ActiveRecordingView: View {
 
             Spacer(minLength: 24)
 
-            Text("Audio saves to disk continuously. A crash cannot lose it.")
+            if let message = recording.healthMessage {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal)
+            }
+
+            Text("Audio saves continuously to this Mac. Keep Scribe open while media finishes saving.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, 28)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .disabled(recording.isFinalizing)
         .confirmationDialog("Discard this recording?", isPresented: $confirmDiscard) {
             Button("Discard Recording", role: .destructive) {
                 recording.discard(library: library)
@@ -205,5 +223,46 @@ struct LevelMeter: View {
 
     private var meterColor: Color {
         level > 0.85 ? .orange : .green
+    }
+}
+
+/// Keeps capture controls accessible while browsing previous recordings.
+struct RecordingStatusBar: View {
+    @EnvironmentObject private var recording: RecordingSession
+    @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var queue: TranscriptionQueue
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: recording.isFinalizing ? "externaldrive" : "record.circle.fill")
+                .foregroundStyle(recording.isPaused ? .orange : .red)
+            Button {
+                if let id = recording.activeDocumentID ?? recording.pendingSaveDocumentID { appState.select(document: id) }
+            } label: {
+                Text(recording.hasPendingSave ? "Recording needs to be saved" : recording.isFinalizing ? "Finishing recording…" : "\(recording.isPaused ? "Paused" : "Recording") · \(recording.elapsed.clockString)")
+                    .font(.callout.weight(.semibold).monospacedDigit())
+            }.buttonStyle(.plain)
+            if let message = recording.healthMessage {
+                Text(message).font(.caption).foregroundStyle(.orange).lineLimit(1)
+            }
+            Spacer()
+            if recording.hasPendingSave {
+                Button("Retry save") { recording.retryFinalSave(library: library, queue: queue) }
+                    .buttonStyle(.borderedProminent)
+            } else if recording.isFinalizing {
+                ProgressView().controlSize(.small)
+            } else {
+                Button(recording.isPaused ? "Resume" : "Pause") { recording.togglePause() }
+                Button("Stop", systemImage: "stop.fill") {
+                    let id = recording.activeDocumentID
+                    recording.stop(library: library, queue: queue)
+                    if let id { appState.select(document: id) }
+                }
+                .buttonStyle(.borderedProminent).tint(.red)
+            }
+        }
+        .padding(.horizontal, 20).padding(.vertical, 10)
+        .background(.bar)
     }
 }

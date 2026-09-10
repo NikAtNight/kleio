@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVKit
 
 /// The document view: header and tabs for a summary, transcript, and notes,
 /// with a player bar at the bottom.
@@ -9,8 +10,15 @@ struct TranscriptView: View {
     @EnvironmentObject private var playback: PlaybackController
     @EnvironmentObject private var replacements: ReplacementStore
     @EnvironmentObject private var appState: AppState
-    @ObservedObject private var voiceProfiles = VoiceProfileStore.shared
+    @Environment(\.undoManager) private var undoManager
+    @ObservedObject private var savedPeople: SavedPeopleStore
     let document: ScribeDocument
+
+    @MainActor
+    init(document: ScribeDocument, savedPeople: SavedPeopleStore? = nil) {
+        self.document = document
+        _savedPeople = ObservedObject(wrappedValue: savedPeople ?? .shared)
+    }
 
     @State private var title: String = ""
     @State private var transcriptSearch = ""
@@ -18,10 +26,13 @@ struct TranscriptView: View {
     @State private var showFindReplace = false
     @State private var matchCase = false
     @State private var replaceResult: String?
-    @State private var showPeople = false
+    @State private var showPeople = true
+    @State private var editingSpeaker: DocumentSpeaker?
+    @State private var showVideo = true
     @State private var newSpeakerName = ""
     @State private var summarizing = false
     @State private var summaryError: String?
+    @State private var speakerEditError: String?
     @State private var correctionSuggestions: [(wrong: String, right: String)] = []
     @State private var selectedTab: DocumentTab = .transcript
 
@@ -55,6 +66,21 @@ struct TranscriptView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if let warning = document.transcriptionWarning {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Some audio is missing").font(.callout.weight(.semibold))
+                        Text(warning).font(.callout).textSelection(.enabled)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(14)
+                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+            }
             Divider()
             Picker("Document section", selection: $selectedTab) {
                 ForEach(DocumentTab.allCases) { tab in
@@ -68,6 +94,23 @@ struct TranscriptView: View {
             Divider()
             tabContent
             Divider()
+            if let error = playback.lastError {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                    Text(error).textSelection(.enabled)
+                    Spacer(minLength: 8)
+                    Button("Retry playback") {
+                        Task {
+                            playback.unload()
+                            await playback.load(document: document, folder: library.folder(for: document.id))
+                        }
+                    }
+                }
+                .font(.caption)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+            }
             PlayerBar(document: document)
         }
         .background(Theme.paperBackground)
@@ -75,7 +118,16 @@ struct TranscriptView: View {
         .task(id: document.id) {
             title = document.title
             selectedTab = hasSummary ? .summary : .transcript
-            await playback.load(document: document)
+            if var current = library.document(id: document.id) {
+                current.normalizeSpeakerIdentities()
+                if current != document { library.update(current) }
+            }
+            await playback.load(document: document, folder: library.folder(for: document.id))
+        }
+        .sheet(item: $editingSpeaker) { person in
+            SpeakerNameSheet(speaker: person, savedPeople: savedPeople.people) { name, savedID, savePerson in
+                try saveSpeakerName(person.id, name: name, savedPersonID: savedID, savePerson: savePerson)
+            }
         }
         .onDisappear {
             if playback.documentID == document.id { playback.unload() }
@@ -87,6 +139,14 @@ struct TranscriptView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(summaryError ?? "")
+        }
+        .alert("Speaker change not saved", isPresented: Binding(
+            get: { speakerEditError != nil },
+            set: { if !$0 { speakerEditError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(speakerEditError ?? "")
         }
     }
 
@@ -187,11 +247,16 @@ struct TranscriptView: View {
 
     private var transcriptTab: some View {
         VStack(spacing: 0) {
+            if document.segments.contains(where: { $0.source != .microphone }) || document.speakerAnalysisStatus == .failed {
+                speakerAnalysisBanner
+            }
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
                     TextField("Find in transcript", text: $transcriptSearch)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 220)
+                        .textFieldStyle(.plain)
+                        .frame(maxWidth: 250)
                     Button {
                         showFindReplace.toggle()
                     } label: {
@@ -201,18 +266,47 @@ struct TranscriptView: View {
                     .keyboardShortcut("f", modifiers: [.command, .shift])
                     .help("Find and replace")
                     Spacer()
+                    Button {
+                        undoManager?.undo()
+                    } label: {
+                        Label("Undo", systemImage: "arrow.uturn.backward")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(undoManager?.canUndo != true)
+                    Button {
+                        withAnimation { showPeople.toggle() }
+                    } label: {
+                        Label("People", systemImage: "person.2")
+                    }
+                    .buttonStyle(.borderless)
+                    .tint(showPeople ? Color.accentColor : .secondary)
                 }
 
                 if showFindReplace { findReplaceBar }
                 if let suggestion = correctionSuggestions.first {
                     correctionSuggestion(suggestion)
                 }
-                if showPeople { peopleBar }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
-
-            segmentList
+            HStack(alignment: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    if showVideo, !(document.videoTracks ?? []).isEmpty {
+                        RecordingVideoView(player: playback.player)
+                            .frame(height: 210)
+                            .background(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 12)
+                    }
+                    segmentList
+                }
+                if showPeople {
+                    peopleInspector
+                        .frame(width: 248)
+                        .padding(.trailing, 16)
+                }
+            }
         }
     }
 
@@ -225,16 +319,27 @@ struct TranscriptView: View {
                         SegmentRow(
                             segment: segment,
                             speakerName: document.speakerName(for: segment),
-                            availableSpeakers: document.availableSpeakerNames,
+                            person: document.speakers?.first { $0.id == segment.speakerID },
+                            availableSpeakers: remoteSpeakers,
                             showSpeaker: document.hasSpeakerLabels,
+                            canEditSpeaker: !isAnalyzingSpeakers,
                             isActive: segment.id == activeSegmentID,
                             highlight: transcriptSearch,
                             onSeek: { playback.seek(to: segment.start) },
                             onEdit: { newText in commitSegmentEdit(segment.id, text: newText) },
-                            onSpeakerChange: { speaker in commitSpeakerChange(segment.id, speaker: speaker) }
+                            onSpeakerChange: { speakerID in
+                                applySpeakerEdit("Assign speaker") { $0.assignSpeaker(to: segment.id, speakerID: speakerID) }
+                            },
+                            onRename: { editingSpeaker = document.speakers?.first { $0.id == segment.speakerID && !$0.isMicrophone } },
+                            onMerge: { target in
+                                guard let source = segment.speakerID else { return }
+                                applySpeakerEdit("Merge speakers") { $0.mergeSpeaker(id: source, into: target) }
+                            }
                         )
+                        .padding(.vertical, 2)
                         .id(segment.id)
                         .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                     case .note(let note):
                         MeetingNoteRow(
                             note: note,
@@ -289,13 +394,14 @@ struct TranscriptView: View {
             }
             .help("Export the transcript")
 
-            Button {
-                selectedTab = .transcript
-                showPeople.toggle()
-            } label: {
-                Label("People", systemImage: "person.2")
+            if !(document.videoTracks ?? []).isEmpty {
+                Button {
+                    selectedTab = .transcript
+                    showVideo.toggle()
+                } label: {
+                    Label(showVideo ? "Hide video" : "Show video", systemImage: "video")
+                }
             }
-            .help("Add, rename, and assign speakers")
 
             Button {
                 summarize()
@@ -359,35 +465,174 @@ struct TranscriptView: View {
         .padding(.top, 4)
     }
 
-    private var peopleBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Label("People", systemImage: "person.2")
-                    .font(.callout.bold())
-                Text("Click a speaker badge on any segment to assign it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
+    private var remoteSpeakers: [DocumentSpeaker] {
+        (document.speakers ?? []).filter { !$0.isMicrophone }
+    }
+
+    private var isAnalyzingSpeakers: Bool {
+        document.speakerAnalysisStatus == .running || document.status == .transcribing
+    }
+
+    private var speakerAnalysisBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if isAnalyzingSpeakers {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: document.speakerAnalysisStatus == .failed ? "exclamationmark.circle" : "waveform.badge.magnifyingglass")
+                    .foregroundStyle(document.speakerAnalysisStatus == .failed ? Color.orange : .secondary)
             }
-            HStack(spacing: 8) {
-                ForEach(document.availableSpeakerNames, id: \.self) { speaker in
-                    SpeakerEditorChip(name: speaker) { newName in
-                        renameSpeaker(speaker, to: newName)
-                    }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(speakerAnalysisTitle)
+                    .font(.callout.weight(.medium))
+                if let error = document.speakerAnalysisError, document.speakerAnalysisStatus == .failed {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                } else if document.speakerEditsApplied == true {
+                    Text("Speaker corrections apply to this recording. Retrying keeps your corrections.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                TextField("New speaker", text: $newSpeakerName)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 130)
-                    .onSubmit(addSpeaker)
-                Button(action: addSpeaker) {
-                    Image(systemName: "plus")
+            }
+            Spacer(minLength: 4)
+            if !isAnalyzingSpeakers {
+                Button(document.speakerAnalysisStatus == .failed ? "Retry" : "Analyze speakers") {
+                    queue.retrySpeakerAnalysis(document.id)
                 }
-                .disabled(newSpeakerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .buttonStyle(.borderless)
+                .disabled(document.segments.isEmpty)
+                .help("Run local speaker analysis without transcribing the audio again")
             }
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
-        .padding(.top, 4)
+        .padding(12)
+        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+    }
+
+    private var speakerAnalysisTitle: String {
+        if isAnalyzingSpeakers { return "Finding speakers on this Mac…" }
+        switch document.speakerAnalysisStatus {
+        case .complete:
+            return document.expectedRemoteSpeakerCount == 1 ? "One other person" : "Speaker analysis complete"
+        case .failed: return "Speaker analysis needs attention"
+        default: return "Review and name the speakers in this recording"
+        }
+    }
+
+    private var peopleInspector: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("People").font(.headline)
+                    Text("Name a speaker or combine duplicate labels.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                VStack(spacing: 0) {
+                    ForEach(document.speakers ?? []) { person in
+                        HStack(spacing: 9) {
+                            Image(systemName: person.isMicrophone ? "mic.fill" : "person.fill")
+                                .font(.caption)
+                                .frame(width: 30, height: 30)
+                                .foregroundStyle(speakerTint(person.id, isMicrophone: person.isMicrophone))
+                                .background(speakerTint(person.id, isMicrophone: person.isMicrophone).opacity(0.12), in: Circle())
+                            VStack(alignment: .leading, spacing: 3) {
+                                if person.isMicrophone {
+                                    Text(person.name).font(.callout.weight(.medium))
+                                } else {
+                                    Button(person.name) { editingSpeaker = person }
+                                        .buttonStyle(.plain)
+                                        .font(.callout.weight(.medium))
+                                        .disabled(isAnalyzingSpeakers)
+                                }
+                                Text(person.isMicrophone ? "Your microphone" : speakerTurnCount(person.id))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            if person.isMicrophone {
+                                Image(systemName: "lock.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .help("Your microphone always belongs to you")
+                            } else {
+                                Menu { speakerActions(person) } label: {
+                                    Image(systemName: "ellipsis.circle")
+                                }
+                                .menuStyle(.borderlessButton)
+                                .frame(width: 22)
+                                .disabled(isAnalyzingSpeakers)
+                                .help("Edit or merge this speaker")
+                            }
+                        }
+                        .padding(11)
+                        .contextMenu {
+                            if !person.isMicrophone { speakerActions(person) }
+                        }
+                        if person.id != document.speakers?.last?.id {
+                            Divider().padding(.leading, 50)
+                        }
+                    }
+                }
+                .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 16))
+
+                if !remoteSpeakers.isEmpty {
+                    Menu {
+                        ForEach(remoteSpeakers) { target in
+                            Button("Keep " + target.name) {
+                                applySpeakerEdit("Combine remote speakers") { $0.mergeAllRemoteSpeakers(into: target.id) }
+                            }
+                        }
+                    } label: {
+                        Label("Only one other person", systemImage: "person.crop.circle.badge.checkmark")
+                            .font(.callout)
+                    }
+                    .disabled(isAnalyzingSpeakers || (remoteSpeakers.count == 1 && document.expectedRemoteSpeakerCount == 1))
+                    .help("Combine all remote labels into the chosen person. You can undo this.")
+                }
+                HStack(spacing: 6) {
+                    TextField("Add a speaker", text: $newSpeakerName)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addSpeaker)
+                    Button(action: addSpeaker) { Image(systemName: "plus.circle.fill") }
+                        .buttonStyle(.borderless)
+                        .disabled(newSpeakerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .disabled(isAnalyzingSpeakers)
+                if let error = savedPeople.lastError {
+                    Text("Saved people: " + error)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Names are optional. Speaker changes keep the original audio and timing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 10)
+        }
+    }
+
+    @ViewBuilder
+    private func speakerActions(_ person: DocumentSpeaker) -> some View {
+        Button("Edit name…") { editingSpeaker = person }
+            .disabled(isAnalyzingSpeakers)
+        if remoteSpeakers.contains(where: { $0.id != person.id }) {
+            Menu("Merge into") {
+                ForEach(remoteSpeakers.filter { $0.id != person.id }) { target in
+                    Button(target.name) {
+                        applySpeakerEdit("Merge speakers") { $0.mergeSpeaker(id: person.id, into: target.id) }
+                    }
+                }
+            }
+            .disabled(isAnalyzingSpeakers)
+        }
+    }
+
+    private func speakerTurnCount(_ id: UUID) -> String {
+        let count = document.segments.filter { $0.speakerID == id }.count
+        return count == 0 ? "Not assigned yet" : count == 1 ? "1 turn" : "\(count) turns"
     }
 
     private func commitTitle() {
@@ -436,50 +681,69 @@ struct TranscriptView: View {
         correctionSuggestions.removeFirst()
     }
 
-    private func commitSpeakerChange(_ segmentID: UUID, speaker: String?) {
-        guard var doc = library.document(id: document.id),
-              let index = doc.segments.firstIndex(where: { $0.id == segmentID }) else { return }
-        doc.segments[index].speaker = speaker
-        // A single reassigned segment is not enough evidence to learn a voice.
-        if let speaker, !speaker.isEmpty {
-            var known = doc.knownSpeakers ?? []
-            if !known.contains(speaker) { known.append(speaker) }
-            doc.knownSpeakers = known
-        }
-        library.update(doc)
-    }
-
     private func addSpeaker() {
-        let name = newSpeakerName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, var doc = library.document(id: document.id) else { return }
-        var known = doc.knownSpeakers ?? []
-        if !known.contains(name) { known.append(name) }
-        doc.knownSpeakers = known
-        library.update(doc)
+        applySpeakerEdit("Add speaker") { $0.addRemoteSpeaker(name: newSpeakerName) != nil }
         newSpeakerName = ""
     }
 
-    private func renameSpeaker(_ oldName: String, to proposedName: String) {
-        let newName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !newName.isEmpty, newName != oldName,
-              var doc = library.document(id: document.id) else { return }
-        for index in doc.segments.indices where doc.speakerName(for: doc.segments[index]) == oldName {
-            doc.segments[index].speaker = newName
+    private func saveSpeakerName(_ id: UUID, name: String, savedPersonID: UUID?, savePerson: Bool) throws {
+        guard let current = library.document(id: document.id),
+              current.speakers?.contains(where: { $0.id == id && !$0.isMicrophone }) == true,
+              current.speakerAnalysisStatus != .running else { throw SpeakerEditFailure.unavailable }
+        let personID = try savePerson ? savedPeople.add(name: name).id : savedPersonID
+        try commitSpeakerEdit("Rename speaker") { $0.renameSpeaker(id: id, to: name, savedPersonID: personID) }
+    }
+
+    private func applySpeakerEdit(_ actionName: String, change: (inout ScribeDocument) -> Bool) {
+        do {
+            try commitSpeakerEdit(actionName, change: change)
+        } catch {
+            speakerEditError = error.localizedDescription
         }
-        var known = (doc.knownSpeakers ?? []).map { $0 == oldName ? newName : $0 }
-        if !known.contains(newName) { known.append(newName) }
-        var seen = Set<String>()
-        doc.knownSpeakers = known.filter { seen.insert($0).inserted }
-        if let embedding = doc.speakerVoiceprints?[oldName] {
-            if voiceProfiles.hasProfile(named: oldName) {
-                voiceProfiles.renameProfile(from: oldName, to: newName)
-            }
-            if voiceProfiles.isRecognitionEnabled {
-                voiceProfiles.learn(name: newName, embedding: embedding)
-            }
-            doc.rekeySpeakerVoiceprint(from: oldName, to: newName)
+    }
+
+    private func commitSpeakerEdit(_ actionName: String, change: (inout ScribeDocument) -> Bool) throws {
+        guard var current = library.document(id: document.id),
+              current.speakerAnalysisStatus != .running else { throw SpeakerEditFailure.unavailable }
+        current.normalizeSpeakerIdentities()
+        let before = current
+        let snapshot = SpeakerEditingSnapshot(document: current)
+        guard change(&current), current != before else { return }
+        guard library.update(current) else {
+            throw SpeakerEditFailure.save(library.lastError ?? "The recording could not be saved.")
         }
-        library.update(doc)
+        if let undoManager {
+            Self.registerSpeakerUndo(snapshot, library: library, undoManager: undoManager, actionName: actionName)
+        }
+    }
+
+    @MainActor
+    private static func registerSpeakerUndo(
+        _ snapshot: SpeakerEditingSnapshot,
+        library: LibraryStore,
+        undoManager: UndoManager,
+        actionName: String
+    ) {
+        undoManager.registerUndo(withTarget: library) { [weak undoManager] store in
+            guard let undoManager, var current = store.document(id: snapshot.documentID) else { return }
+            let redo = SpeakerEditingSnapshot(document: current)
+            guard current.restoreSpeakerEdits(snapshot) else { return }
+            guard store.update(current) else { return }
+            registerSpeakerUndo(redo, library: store, undoManager: undoManager, actionName: actionName)
+        }
+        undoManager.setActionName(actionName)
+    }
+
+    private enum SpeakerEditFailure: LocalizedError {
+        case unavailable
+        case save(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable: return "This speaker is no longer available, or speaker analysis is still running."
+            case .save(let message): return message
+            }
+        }
     }
 
     private func replaceAll() {
@@ -528,97 +792,154 @@ struct TranscriptView: View {
     }
 }
 
-struct SpeakerEditorChip: View {
-    let name: String
-    let onRename: (String) -> Void
+private struct SpeakerNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let speaker: DocumentSpeaker
+    let savedPeople: [SavedPerson]
+    let onSave: (String, UUID?, Bool) throws -> Void
+    @State private var name: String
+    @State private var selectedPersonID: UUID?
+    @State private var savePerson = false
+    @State private var error: String?
 
-    @State private var text = ""
-    @FocusState private var focused: Bool
+    init(speaker: DocumentSpeaker, savedPeople: [SavedPerson], onSave: @escaping (String, UUID?, Bool) throws -> Void) {
+        self.speaker = speaker
+        self.savedPeople = savedPeople
+        self.onSave = onSave
+        _name = State(initialValue: speaker.name)
+        _selectedPersonID = State(initialValue: speaker.savedPersonID)
+    }
 
     var body: some View {
-        TextField("Speaker", text: $text)
-            .textFieldStyle(.roundedBorder)
-            .font(.caption.bold())
-            .frame(width: 110)
-            .focused($focused)
-            .onSubmit { onRename(text) }
-            .onChange(of: focused) { _, isFocused in
-                if !isFocused { onRename(text) }
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Name this speaker").font(.title2.bold())
+                Text("Changes apply to this recording.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
-            .onAppear { text = name }
-            .onChange(of: name) { _, newValue in
-                if !focused { text = newValue }
+            VStack(alignment: .leading, spacing: 12) {
+                TextField("Speaker name", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: name) { _, updated in
+                        if let person = savedPeople.first(where: { $0.id == selectedPersonID }), person.name != updated {
+                            selectedPersonID = nil
+                        }
+                    }
+                Picker("Saved person", selection: $selectedPersonID) {
+                    Text("Choose a saved person").tag(UUID?.none)
+                    ForEach(savedPeople) { person in
+                        Text(person.name).tag(Optional(person.id))
+                    }
+                }
+                .onChange(of: selectedPersonID) { _, id in
+                    if let person = savedPeople.first(where: { $0.id == id }) {
+                        name = person.name
+                        savePerson = false
+                    }
+                }
+                if selectedPersonID == nil {
+                    Toggle("Save person for other recordings", isOn: $savePerson)
+                        .font(.callout)
+                }
             }
+            if let error {
+                Text(error).font(.callout).foregroundStyle(.red)
+            }
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Save name") {
+                    do {
+                        try onSave(name, selectedPersonID, savePerson)
+                        dismiss()
+                    } catch {
+                        self.error = error.localizedDescription
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 390)
     }
 }
 
 struct SegmentRow: View {
     let segment: TranscriptSegment
     let speakerName: String
-    let availableSpeakers: [String]
+    let person: DocumentSpeaker?
+    let availableSpeakers: [DocumentSpeaker]
     let showSpeaker: Bool
+    let canEditSpeaker: Bool
     let isActive: Bool
     let highlight: String
     let onSeek: () -> Void
     let onEdit: (String) -> Void
-    let onSpeakerChange: (String?) -> Void
+    let onSpeakerChange: (UUID) -> Void
+    let onRename: () -> Void
+    let onMerge: (UUID) -> Void
 
     @State private var text: String = ""
     @FocusState private var focused: Bool
 
+    private var isMicrophone: Bool { segment.source == .microphone || person?.isMicrophone == true }
+
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Button(action: onSeek) {
-                Text(segment.start.clockString)
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(isActive ? Color.accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Jump playback here")
-            .frame(width: 56, alignment: .trailing)
-
-            if showSpeaker {
-                Menu {
-                    ForEach(availableSpeakers, id: \.self) { speaker in
-                        Button {
-                            onSpeakerChange(speaker)
-                        } label: {
-                            if speaker == speakerName {
-                                Label(speaker, systemImage: "checkmark")
-                            } else {
-                                Text(speaker)
-                            }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                if showSpeaker {
+                    if isMicrophone {
+                        Label(speakerName, systemImage: "mic.fill")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(.blue)
+                            .help("Your microphone always belongs to you")
+                    } else {
+                        Button(action: onRename) {
+                            Text(speakerName.isEmpty ? "Speaker" : speakerName)
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(speakerTint(person?.id, isMicrophone: false))
                         }
+                        .buttonStyle(.plain)
+                        .disabled(!canEditSpeaker || person == nil)
+                        .help("Name this speaker")
+                        .contextMenu { speakerMenu }
+                        Menu { speakerMenu } label: {
+                            Image(systemName: "ellipsis")
+                                .foregroundStyle(.secondary)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .frame(width: 20)
+                        .disabled(!canEditSpeaker)
+                        .help("Speaker actions")
                     }
-                    Divider()
-                    Button("No Speaker") { onSpeakerChange(nil) }
-                } label: {
-                    Text(speakerName.isEmpty ? "Speaker" : speakerName)
-                        .font(.caption.bold())
-                        .lineLimit(1)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(speakerColor.opacity(0.18)))
-                        .foregroundStyle(speakerColor)
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+                Spacer()
+                Button(action: onSeek) {
+                    Text(segment.start.clockString)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Jump playback here")
             }
-
             TextField("", text: $text, axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(.body)
+                .font(.system(size: 15))
+                .lineSpacing(4)
                 .focused($focused)
                 .onSubmit { onEdit(text) }
                 .onChange(of: focused) { _, isFocused in
                     if !isFocused { onEdit(text) }
                 }
         }
-        .padding(.vertical, 5)
-        .padding(.horizontal, 8)
+        .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isActive ? Color.accentColor.opacity(0.10) : .clear)
+            RoundedRectangle(cornerRadius: 14)
+                .fill(isActive ? Color.accentColor.opacity(0.10) : Theme.cardBackground)
         )
         .onAppear { text = segment.text }
         .onChange(of: segment.text) { _, newValue in
@@ -626,17 +947,55 @@ struct SegmentRow: View {
         }
     }
 
-    private var speakerColor: Color {
-        switch speakerName {
-        case "You": return .blue
-        case "Them": return .purple
-        default:
-            let palette: [Color] = [.blue, .purple, .green, .orange, .pink, .teal]
-            let value = speakerName.unicodeScalars.reduce(UInt64(5_381)) { partial, scalar in
-                (partial &* 33) &+ UInt64(scalar.value)
+    @ViewBuilder
+    private var speakerMenu: some View {
+        Button("Edit speaker name…", action: onRename)
+            .disabled(!canEditSpeaker || person == nil)
+        if availableSpeakers.contains(where: { $0.id != segment.speakerID }) {
+            Menu("Merge this speaker into") {
+                ForEach(availableSpeakers.filter { $0.id != segment.speakerID }) { target in
+                    Button(target.name) { onMerge(target.id) }
+                }
             }
-            return palette[Int(value % UInt64(palette.count))]
+            .disabled(!canEditSpeaker || person == nil)
+            Divider()
+            Menu("Assign this turn to") {
+                ForEach(availableSpeakers) { target in
+                    Button {
+                        onSpeakerChange(target.id)
+                    } label: {
+                        if target.id == segment.speakerID {
+                            Label(target.name, systemImage: "checkmark")
+                        } else {
+                            Text(target.name)
+                        }
+                    }
+                }
+            }
+            .disabled(!canEditSpeaker)
         }
+    }
+}
+
+private func speakerTint(_ id: UUID?, isMicrophone: Bool) -> Color {
+    if isMicrophone { return .blue }
+    let palette: [Color] = [.purple, .green, .orange, .pink, .teal, .indigo]
+    let value = (id?.uuidString ?? "").unicodeScalars.reduce(UInt64(5_381)) { ($0 &* 33) &+ UInt64($1.value) }
+    return palette[Int(value % UInt64(palette.count))]
+}
+
+private struct RecordingVideoView: NSViewRepresentable {
+    let player: AVPlayer?
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .none
+        view.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        view.player = player
     }
 }
 
@@ -702,6 +1061,7 @@ struct MeetingNoteRow: View {
 
 /// Bottom playback bar: transport controls, scrubber, and speed.
 struct PlayerBar: View {
+    @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var playback: PlaybackController
     let document: ScribeDocument
     @State private var waveformSamples: [Float] = []
@@ -769,7 +1129,7 @@ struct PlayerBar: View {
         .task(id: document.id) {
             waveformSamples = []
             let urls = document.tracks.map {
-                LibraryStore.folder(for: document.id).appendingPathComponent($0.fileName)
+                library.folder(for: document.id).appendingPathComponent($0.fileName)
             }
             waveformSamples = await WaveformSampler.samples(for: urls)
         }

@@ -151,6 +151,11 @@ struct ScribeApp: App {
                         let ids = Importer.importFiles(urls, library: library, queue: queue)
                         if let first = ids.first { appState.select(document: first) }
                     }
+                    appDelegate.recording = recording
+                    appDelegate.finishRecording = {
+                        await recording.prepareToQuit(library: library, queue: queue)
+                        return !recording.hasPendingSave
+                    }
                     appDelegate.calendarSync = calendarSync
                     appDelegate.autoRecordArbiter = autoRecordArbiter
                     calendarSync.start()
@@ -209,6 +214,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var onOpenFiles: (([URL]) -> Void)?
     weak var calendarSync: CalendarSync?
     weak var autoRecordArbiter: AutoRecordArbiter?
+    weak var recording: RecordingSession?
+    var finishRecording: (() async -> Bool)?
+    private var terminating = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let recording, recording.isBusy else {
+            return .terminateNow
+        }
+        guard !terminating else { return .terminateLater }
+        terminating = true
+        Task { @MainActor in
+            let saved = await finishRecording?() ?? false
+            if !saved { terminating = false }
+            sender.reply(toApplicationShouldTerminate: saved)
+        }
+        return .terminateLater
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)

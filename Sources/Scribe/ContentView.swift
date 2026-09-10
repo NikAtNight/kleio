@@ -19,6 +19,11 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280)
         } detail: {
             detail
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if recording.isRecording || recording.isFinalizing || recording.hasPendingSave {
+                        RecordingStatusBar()
+                    }
+                }
         }
         .searchable(text: $searchText, placement: .sidebar, prompt: "Search transcripts")
         .toolbar {
@@ -81,6 +86,14 @@ struct ContentView: View {
             }
         }
         .environmentObject(playback)
+        .alert("Library Problem", isPresented: Binding(
+            get: { library.lastError != nil },
+            set: { if !$0 { library.lastError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(library.lastError ?? "")
+        }
         .alert("Recording Problem", isPresented: recordingErrorBinding) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -90,10 +103,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if recording.isRecording {
-            ActiveRecordingView()
-        } else {
-            switch appState.selection {
+        switch appState.selection {
             case .home:
                 HomeView()
                     .background(Theme.paperBackground)
@@ -108,7 +118,6 @@ struct ContentView: View {
                 }
             case .meeting(let id):
                 MeetingDetailView(meetingID: id)
-            }
         }
     }
 
@@ -158,6 +167,7 @@ struct RecordMenu: View {
             .buttonStyle(.borderedProminent)
             .tint(.red)
             .help("Stop recording and transcribe")
+            .disabled(recording.isFinalizing)
         } else {
             Menu {
                 ForEach(RecordingMode.allCases) { mode in
@@ -173,12 +183,14 @@ struct RecordMenu: View {
             .buttonStyle(.borderedProminent)
             .tint(.red)
             .help("Start a new recording")
+            .disabled(recording.isBusy)
         }
     }
 
     private func start(_ mode: RecordingMode) {
         Task {
-            await recording.start(mode: mode, library: library)
+            await recording.startUsingPreferences(mode: mode, library: library)
+            if let id = recording.activeDocumentID { appState.select(document: id) }
         }
     }
 }
@@ -348,6 +360,7 @@ struct SidebarRow: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var queue: TranscriptionQueue
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var recording: RecordingSession
     let document: ScribeDocument
     @State private var waveformSamples: [Float] = []
 
@@ -372,7 +385,7 @@ struct SidebarRow: View {
                         .frame(height: 14)
                         .task(id: document.id) {
                             let urls = document.tracks.map {
-                                LibraryStore.folder(for: document.id).appendingPathComponent($0.fileName)
+                                library.folder(for: document.id).appendingPathComponent($0.fileName)
                             }
                             let samples = await WaveformSampler.samples(for: urls, bucketCount: 1_000)
                             guard !Task.isCancelled else { return }
@@ -384,15 +397,16 @@ struct SidebarRow: View {
         .padding(.vertical, 4)
         .contextMenu {
             Button("Re-transcribe") { queue.enqueue(document.id) }
-                .disabled(document.status == .transcribing || document.status == .recording)
+                .disabled(document.status == .transcribing || document.status == .recording || (recording.activeDocumentID == document.id || recording.pendingSaveDocumentID == document.id))
             Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([LibraryStore.folder(for: document.id)])
+                NSWorkspace.shared.activateFileViewerSelecting([library.folder(for: document.id)])
             }
             Divider()
             Button("Delete", role: .destructive) {
                 if appState.selectedDocumentID == document.id { appState.selection = .home }
                 library.delete(document)
             }
+            .disabled(document.status == .recording || (recording.activeDocumentID == document.id || recording.pendingSaveDocumentID == document.id))
         }
     }
 
@@ -468,7 +482,7 @@ struct SidebarRow: View {
     }
 }
 
-/// Empty-selection home.
+/// App shortcuts and capture options stay together so the target is visible before starting.
 struct HomeView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var recording: RecordingSession
@@ -476,153 +490,259 @@ struct HomeView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var dictation: DictationController
     @EnvironmentObject private var calendarSync: CalendarSync
+    @StateObject private var shortcuts = AppShortcutStore()
     @Environment(\.openSettings) private var openSettings
+    @AppStorage("recordingVideoEnabled") private var videoEnabled = false
+    @AppStorage("recordingVideoMode") private var videoMode = "window"
+    @AppStorage("expectedRemoteSpeakerCount") private var speakerCount = 0
+    @AppStorage("microphoneSpeakerName") private var microphoneName = "Me"
+    @AppStorage("preferredInputDeviceUID") private var inputUID = ""
+    @AppStorage("speakerDetectionModel") private var speakerModel = "community1"
+    @State private var devices = AudioDevices.inputDevices()
+
+    private var canStart: Bool {
+        !recording.isBusy && dictation.phase == .idle
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 header
+                captureOptions
+                shortcutsSection
 
-                if showsUpNext {
+                if calendarSync.isEnabled && calendarSync.upcomingMeetings.contains(where: {
+                    Calendar.current.isDateInToday($0.start)
+                }) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Up Next")
-                            .font(.title3.bold())
+                        Text("Up next").font(.title3.bold())
                         UpNextStrip()
                     }
                 }
 
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Recent")
-                        .font(.title3.bold())
-
+                    Text("Recent recordings").font(.title3.bold())
                     if recentDocuments.isEmpty {
-                        emptyLibrary
+                        ContentUnavailableView("Your recordings live here", systemImage: "waveform",
+                            description: Text("Choose an app above, record a voice memo, or open a file."))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 20)
+                            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 18))
                     } else {
-                        LazyVGrid(
-                            columns: [GridItem(.adaptive(minimum: 220, maximum: 260), spacing: 14)],
-                            spacing: 14
-                        ) {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 14)], spacing: 14) {
                             ForEach(recentDocuments) { document in
                                 RecentDocumentCard(document: document)
                             }
                         }
                     }
                 }
-
-                HStack(spacing: 10) {
-                    Button {
-                        appState.presentImporter(.podcast)
-                    } label: {
-                        Label("Podcast Tracks…", systemImage: "person.2.wave.2")
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button {
-                        if dictation.enabled {
-                            dictation.toggle()
-                        } else {
-                            dictation.setEnabled(true, promptForAccessibility: true)
-                        }
-                    } label: {
-                        Label(
-                            dictation.enabled ? "Dictation On" : "Enable Dictation",
-                            systemImage: "text.cursor"
-                        )
-                    }
-                    .buttonStyle(.bordered)
-
-                    Spacer(minLength: 0)
-
-                    Button {
-                        openSettings()
-                    } label: {
-                        Text("Model: \(modelDisplayName) · change in Settings")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
             }
-            .padding(24)
-            .frame(maxWidth: 1_100, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(28)
+            .frame(maxWidth: 1100, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            devices = AudioDevices.inputDevices()
+        }
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text("Scribe")
-                .font(.largeTitle.bold())
-
-            Spacer(minLength: 24)
-
-            Button {
-                Task { await recording.start(mode: .meeting, library: library) }
-            } label: {
-                Label("Record Meeting", systemImage: "record.circle")
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Recordings").font(Theme.displayTitle())
+                Label("Transcribed on this Mac", systemImage: "lock.shield")
+                    .font(.callout).foregroundStyle(.secondary)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .disabled(dictation.phase != .idle)
-
+            Spacer()
             Menu {
-                ForEach([RecordingMode.systemOnly, .microphoneOnly]) { mode in
+                ForEach(ModelManager.catalog.filter { modelManager.isDownloaded($0.variant) }) { model in
                     Button {
-                        Task { await recording.start(mode: mode, library: library) }
+                        modelManager.selectedVariant = model.variant
                     } label: {
-                        Label(mode.title, systemImage: mode.icon)
+                        if model.variant == modelManager.selectedVariant {
+                            Label(model.displayName, systemImage: "checkmark")
+                        } else { Text(model.displayName) }
                     }
                 }
+                Divider()
+                Button("Manage models…") { openSettings() }
             } label: {
-                Image(systemName: "chevron.down")
+                Label(ModelManager.catalog.first { $0.variant == modelManager.selectedVariant }?.displayName ?? "Choose model",
+                      systemImage: "cpu")
             }
-            .menuStyle(.borderlessButton)
-            .disabled(dictation.phase != .idle)
-
-            Button {
-                appState.presentImporter(.files)
-            } label: {
-                Label("Open File…", systemImage: "folder")
-            }
-            .buttonStyle(.bordered)
+            .controlSize(.large)
         }
+    }
+
+    private var captureOptions: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Label("Recording setup", systemImage: "slider.horizontal.3").font(.headline)
+                Spacer()
+                Toggle(isOn: $videoEnabled) {
+                    Label("Record video", systemImage: videoEnabled ? "video.fill" : "video.slash")
+                }
+                .toggleStyle(.switch)
+                .fixedSize()
+            }
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Microphone · \(microphoneName.isEmpty ? "Me" : microphoneName)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("Microphone", selection: $inputUID) {
+                        Text("System default").tag("")
+                        ForEach(devices) { Text($0.name).tag($0.uid) }
+                    }
+                    .labelsHidden()
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Other participants").font(.caption).foregroundStyle(.secondary)
+                    RemoteSpeakerCountPicker(selection: $speakerCount)
+                        .labelsHidden()
+                }
+                if videoEnabled {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Video source").font(.caption).foregroundStyle(.secondary)
+                        Picker("Video source", selection: $videoMode) {
+                            Text("Choose a window").tag("window")
+                            Text("Choose a display").tag("display")
+                        }.labelsHidden()
+                    }
+                }
+            }
+            Text(speakerCount == 1
+                 ? "Your microphone is always you. All remote speech is assigned to one other person."
+                 : "Your microphone is always you. Other voices are grouped locally after recording.")
+                .font(.caption).foregroundStyle(.secondary)
+            if speakerModel == "sortformer", speakerCount != 1, !(2...4).contains(speakerCount) {
+                Label("Sortformer needs a count of 2 to 4 other people. Choose a count or switch to Community-1 in Settings.", systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            if speakerCount != 1, !SpeakerDiarizer.modelsReady(for: SpeakerDetectionModel(rawValue: speakerModel) ?? .community1) {
+                HStack {
+                    Text("Download a speaker model before using automatic speaker detection.")
+                    Button("Open Settings") { openSettings() }
+                }.font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 18))
+        .disabled(!canStart)
+    }
+
+    private var shortcutsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Start recording").font(.title3.bold())
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 175), spacing: 12)], spacing: 12) {
+                ForEach(shortcuts.shortcuts) { shortcut in
+                    Button { start(.meeting, shortcut: shortcut) } label: {
+                        shortcutLabel(title: shortcut.name, subtitle: "App audio + microphone") {
+                            Image(nsImage: shortcut.icon).resizable().frame(width: 28, height: 28)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canStart)
+                    .contextMenu {
+                        if let url = shortcut.applicationURL {
+                            Button("Open \(shortcut.name)") { NSWorkspace.shared.openApplication(at: url, configuration: .init()) }
+                        }
+                        Button("Remove shortcut", role: .destructive) { shortcuts.remove(shortcut) }
+                    }
+                }
+                Button(action: addShortcut) {
+                    shortcutLabel(title: "Add app", subtitle: "Choose any installed app") {
+                        Image(systemName: "plus.app").font(.system(size: 25)).foregroundStyle(.tint)
+                    }
+                }.buttonStyle(.plain)
+            }
+            Text("Browser shortcuts capture audio from all audible tabs. With video on, macOS asks you to choose a window or display.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Button { start(.microphoneOnly) } label: { Label("Voice memo", systemImage: "mic") }
+                    .disabled(!canStart)
+                Button { start(.meeting) } label: { Label("All Mac audio + mic", systemImage: "desktopcomputer") }
+                    .disabled(!canStart)
+                Button { appState.presentImporter(.files) } label: { Label("Open files", systemImage: "folder") }
+                Menu("More") {
+                    Button("Podcast speaker tracks…") { appState.presentImporter(.podcast) }
+                    Button("All Mac audio only") { start(.systemOnly) }.disabled(!canStart)
+                    Button(dictation.enabled ? "Start dictation" : "Enable dictation") {
+                        if dictation.enabled { dictation.toggle() }
+                        else { dictation.setEnabled(true, promptForAccessibility: true) }
+                    }.disabled(!canStart)
+                }
+            }
+            .controlSize(.large)
+        }
+    }
+
+    private func shortcutLabel<Icon: View>(title: String, subtitle: String, @ViewBuilder icon: () -> Icon) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            icon().frame(height: 28)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline).lineLimit(1)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 105, alignment: .leading)
+        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .contentShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func start(_ mode: RecordingMode, shortcut: RecordingApplication? = nil) {
+        guard canStart else { return }
+        Task {
+            await recording.startUsingPreferences(mode: mode, library: library, shortcut: shortcut)
+            if let id = recording.activeDocumentID { appState.select(document: id) }
+        }
+    }
+
+    private func addShortcut() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.prompt = "Add shortcut"
+        guard panel.runModal() == .OK, let url = panel.url,
+              let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier else { return }
+        let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? url.deletingPathExtension().lastPathComponent
+        shortcuts.add(RecordingApplication(bundleID: bundleID, name: name))
     }
 
     private var recentDocuments: [ScribeDocument] {
-        Array(
-            library.documents
-                .filter { $0.status == .ready }
-                .sorted { $0.createdAt > $1.createdAt }
-                .prefix(9)
-        )
+        Array(library.documents.sorted { $0.createdAt > $1.createdAt }.prefix(12))
     }
+}
 
-    private var showsUpNext: Bool {
-        calendarSync.isEnabled && calendarSync.upcomingMeetings.contains {
-            Calendar.current.isDateInToday($0.start)
+struct RemoteSpeakerCountPicker: View {
+    @Binding var selection: Int
+    var body: some View {
+        Picker("Other participants", selection: $selection) {
+            Text("Detect automatically").tag(0)
+            Text("One other person").tag(1)
+            ForEach(2...12, id: \.self) { count in
+                Text("\(count) other people").tag(count)
+            }
         }
     }
+}
 
-    private var emptyLibrary: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "waveform")
-                .font(.system(size: 34, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.tint)
-            Text("No recordings yet")
-                .font(.headline)
-            Text("Record a call or drop in an audio file to get started.")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 52)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var modelDisplayName: String {
-        ModelManager.catalog.first { $0.variant == modelManager.selectedVariant }?.displayName
-            ?? modelManager.selectedVariant
+@MainActor
+extension RecordingSession {
+    func startUsingPreferences(mode: RecordingMode, library: LibraryStore, shortcut: RecordingApplication? = nil) async {
+        let defaults = UserDefaults.standard
+        let microphoneName = defaults.string(forKey: "microphoneSpeakerName")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Me"
+        let count = defaults.integer(forKey: "expectedRemoteSpeakerCount")
+        let videoMode = defaults.bool(forKey: "recordingVideoEnabled")
+            ? VideoCaptureMode(rawValue: defaults.string(forKey: "recordingVideoMode") ?? "window") : nil
+        await start(mode: mode, library: library,
+                    application: shortcut,
+                    videoMode: videoMode,
+                    microphoneSpeakerName: microphoneName.isEmpty ? "Me" : microphoneName,
+                    expectedRemoteSpeakerCount: count > 0 ? count : nil)
     }
 }
 
@@ -630,18 +750,22 @@ struct RecentDocumentCard: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var queue: TranscriptionQueue
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var recording: RecordingSession
     let document: ScribeDocument
     @State private var hovering = false
-    @State private var waveformSamples: [Float] = []
 
     var body: some View {
         Button {
             appState.select(document: document.id)
         } label: {
             VStack(alignment: .leading, spacing: 8) {
-                waveformThumbnail
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 28)
+                HStack {
+                    Image(systemName: document.videoTracks?.isEmpty == false ? "video" : "waveform")
+                        .foregroundStyle(.tint)
+                    Spacer()
+                    Text(statusLabel)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Text(document.title)
                     .font(.headline)
                     .lineLimit(1)
@@ -649,6 +773,9 @@ struct RecentDocumentCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                Text(document.segments.isEmpty ? "Transcript will appear here when processing finishes." : document.fullText)
+                    .font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(12)
             .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
@@ -661,25 +788,18 @@ struct RecentDocumentCard: View {
         .buttonStyle(RecentDocumentCardButtonStyle(hovering: hovering))
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
-        .task(id: document.id) {
-            let urls = document.tracks.map {
-                LibraryStore.folder(for: document.id).appendingPathComponent($0.fileName)
-            }
-            let samples = await WaveformSampler.samples(for: urls, bucketCount: 1_000)
-            guard !Task.isCancelled else { return }
-            waveformSamples = downsample(samples, to: 96)
-        }
         .contextMenu {
             Button("Re-transcribe") { queue.enqueue(document.id) }
-                .disabled(document.status == .transcribing || document.status == .recording)
+                .disabled(document.status == .transcribing || document.status == .recording || (recording.activeDocumentID == document.id || recording.pendingSaveDocumentID == document.id))
             Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([LibraryStore.folder(for: document.id)])
+                NSWorkspace.shared.activateFileViewerSelecting([library.folder(for: document.id)])
             }
             Divider()
             Button("Delete", role: .destructive) {
                 if appState.selectedDocumentID == document.id { appState.selection = .home }
                 library.delete(document)
             }
+            .disabled(document.status == .recording || (recording.activeDocumentID == document.id || recording.pendingSaveDocumentID == document.id))
         }
     }
 
@@ -694,42 +814,15 @@ struct RecentDocumentCard: View {
         }
     }
 
-    private var waveformThumbnail: some View {
-        Canvas { context, size in
-            guard !waveformSamples.isEmpty else { return }
-
-            let barWidth: CGFloat = 1.5
-            let barCount = waveformSamples.count
-            let gap = barCount > 1
-                ? max(1, (size.width - CGFloat(barCount) * barWidth) / CGFloat(barCount - 1))
-                : 0
-            let center = size.height / 2
-
-            for (index, sample) in waveformSamples.enumerated() {
-                let height = max(2, CGFloat(sample) * size.height)
-                let rect = CGRect(
-                    x: CGFloat(index) * (barWidth + gap),
-                    y: center - height / 2,
-                    width: barWidth,
-                    height: height
-                )
-                context.fill(
-                    Path(roundedRect: rect, cornerRadius: 0.75),
-                    with: .color(Color(nsColor: .tertiaryLabelColor))
-                )
-            }
-        }
-        .accessibilityHidden(true)
-    }
-
-    private func downsample(_ samples: [Float], to bucketCount: Int) -> [Float] {
-        guard samples.count > bucketCount else { return samples }
-
-        return (0..<bucketCount).map { index in
-            let start = index * samples.count / bucketCount
-            let end = max(start + 1, (index + 1) * samples.count / bucketCount)
-            return samples[start..<min(end, samples.count)].max() ?? 0
-        }
+    private var statusLabel: String {
+        guard document.status == .ready else { return document.status.rawValue.capitalized }
+        if document.speakerAnalysisStatus == .failed { return "Speakers need review" }
+        let labels = Set(document.segments.map { document.speakerName(for: $0) })
+        let unresolved = labels.contains("Uncertain speaker") || labels.contains("Unanalyzed audio")
+        let count = labels.subtracting(["Uncertain speaker", "Unanalyzed audio"]).count
+        if count == 0 { return unresolved ? "Speakers need review" : "No speech" }
+        let countLabel = count == 1 ? "1 speaker" : "\(count) speakers"
+        return unresolved ? countLabel + " · review needed" : countLabel
     }
 }
 
@@ -772,6 +865,7 @@ struct DropOverlay: View {
 struct DocumentDetailView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var queue: TranscriptionQueue
+    @EnvironmentObject private var recording: RecordingSession
     let document: ScribeDocument
 
     var body: some View {
@@ -795,10 +889,11 @@ struct DocumentDetailView: View {
                 ContentUnavailableView {
                     Label("Recording recovered", systemImage: "bandage")
                 } description: {
-                    Text("Scribe quit unexpectedly during this recording, but \(document.duration.clockString) of audio was saved safely and is ready to transcribe.")
+                    Text(document.failureReason ?? "Scribe found \(document.duration.clockString) of saved media from an interrupted recording. Review it, then transcribe the available audio.")
                 }
                 Button("Transcribe Now") { queue.enqueue(document.id) }
                     .buttonStyle(.borderedProminent)
+                    .disabled((recording.activeDocumentID == document.id || recording.pendingSaveDocumentID == document.id))
             }
         case .recording:
             ActiveRecordingView()

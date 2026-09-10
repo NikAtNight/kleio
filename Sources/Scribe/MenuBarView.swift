@@ -48,7 +48,11 @@ struct MenuBarView: View {
             Divider()
         }
 
-        if recording.isRecording {
+        if recording.hasPendingSave {
+            Button("Retry saving recording") { recording.retryFinalSave(library: library, queue: queue) }
+        } else if recording.isFinalizing || recording.isStarting {
+            Text(recording.isStarting ? "Preparing recording…" : "Finishing recording…")
+        } else if recording.isRecording {
             Text("Recording, \(recording.elapsed.clockString)")
             Button(recording.isPaused ? "Resume" : "Pause") {
                 recording.togglePause()
@@ -59,13 +63,14 @@ struct MenuBarView: View {
                 if let id { appState.select(document: id) }
                 openMain()
             }
-            Button("Discard Recording") {
-                recording.discard(library: library)
-            }
         } else {
             ForEach(RecordingMode.allCases) { mode in
                 Button {
-                    Task { await recording.start(mode: mode, library: library) }
+                    openMain()
+                    Task {
+                        await recording.startUsingPreferences(mode: mode, library: library)
+                        if let id = recording.activeDocumentID { appState.select(document: id) }
+                    }
                 } label: {
                     Label(mode.title, systemImage: mode.icon)
                 }

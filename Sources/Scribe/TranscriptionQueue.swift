@@ -1,10 +1,9 @@
 import Foundation
 import SwiftUI
+import AVFoundation
 
-/// Serial transcription queue: documents are processed one at a time (the
-/// Whisper pipeline is memory-heavy), with per-document progress published
-/// for the UI. Meeting recordings transcribe each track separately and merge
-/// the segments into one chronological You/Them dialogue.
+/// Transcription and speaker analysis share a serial queue so large local
+/// models do not process competing documents at the same time.
 @MainActor
 final class TranscriptionQueue: ObservableObject {
     @Published private(set) var progress: [UUID: Double] = [:]
@@ -14,8 +13,13 @@ final class TranscriptionQueue: ObservableObject {
     let transcriber = Transcriber()
     let speakerDiarizer = SpeakerDiarizer()
 
-    private var pending: [UUID] = []
-    private var isProcessing = false
+    private struct Job {
+        var documentID: UUID
+        var speakersOnly: Bool
+    }
+    private var pending: [Job] = []
+    private var currentDocumentID: UUID?
+    private var processingTask: Task<Void, Never>?
     private weak var library: LibraryStore?
     private weak var modelManager: ModelManager?
     private weak var replacementStore: ReplacementStore?
@@ -51,195 +55,231 @@ final class TranscriptionQueue: ObservableObject {
         return merged
     }
 
-    func enqueue(_ docID: UUID) {
-        guard !pending.contains(docID) else { return }
-        if var doc = library?.document(id: docID), doc.status != .queued {
-            doc.status = .queued
-            library?.update(doc)
+    nonisolated static func transcriptionInputs(
+        for document: ScribeDocument, folder: URL
+    ) throws -> (tracks: [AudioTrack], omitted: [String]) {
+        var available: [AudioTrack] = []
+        var omitted: [String] = []
+        for track in document.tracks {
+            do {
+                let file = try AVAudioFile(forReading: folder.appendingPathComponent(track.fileName))
+                guard file.length > 0, file.processingFormat.sampleRate > 0,
+                      let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                                    frameCapacity: AVAudioFrameCount(min(file.length, 1_024))) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                try file.read(into: buffer)
+                guard buffer.frameLength > 0 else { throw CocoaError(.fileReadCorruptFile) }
+                available.append(track)
+            } catch {
+                omitted.append(sourceDescription(for: track))
+            }
         }
-        pending.append(docID)
+        guard !available.isEmpty else {
+            throw inputError("No usable audio remains in this recording. Its original media references have been kept.", omitted: omitted)
+        }
+        if document.recoveredAt == nil, document.status != .recovered, !omitted.isEmpty {
+            throw inputError("Audio is missing, empty, or unreadable. Restore these files before retrying transcription.", omitted: omitted)
+        }
+        return (available, omitted)
+    }
+
+    private nonisolated static func sourceDescription(for track: AudioTrack) -> String {
+        let source: String
+        switch track.source {
+        case .microphone: source = "Microphone"
+        case .system: source = "App audio"
+        case .imported: source = track.speakerName ?? "Imported audio"
+        }
+        return "\(source) (\(track.fileName))"
+    }
+
+    private nonisolated static func inputError(_ message: String, omitted: [String]) -> Error {
+        NSError(domain: "Scribe.TranscriptionInputs", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message + (omitted.isEmpty ? "" : " " + omitted.joined(separator: ", "))])
+    }
+
+    private nonisolated static func recoveryWarning(omitted: [String]) -> String? {
+        guard !omitted.isEmpty else { return nil }
+        return "Partial transcript from recovered audio. These sources were unavailable or could not be transcribed: "
+            + omitted.joined(separator: ", ") + ". Their original media references have been kept."
+    }
+
+    func enqueue(_ docID: UUID) {
+        guard currentDocumentID != docID, !pending.contains(where: { $0.documentID == docID }),
+              var doc = library?.document(id: docID), doc.status != .recording else { return }
+        if doc.status == .recovered { doc.recoveredAt = doc.recoveredAt ?? Date() }
+        doc.status = .queued
+        doc.failureReason = nil
+        library?.update(doc)
+        pending.append(Job(documentID: docID, speakersOnly: false))
+        pendingCount = pending.count
+        pump()
+    }
+
+    func retrySpeakerAnalysis(_ docID: UUID) {
+        guard currentDocumentID != docID, !pending.contains(where: { $0.documentID == docID }),
+              let doc = library?.document(id: docID), doc.status == .ready,
+              !doc.segments.isEmpty else { return }
+        pending.append(Job(documentID: docID, speakersOnly: true))
         pendingCount = pending.count
         pump()
     }
 
     func cancelCurrent() {
         transcriber.cancelCurrent()
+        processingTask?.cancel()
     }
 
     private func pump() {
-        guard !isProcessing, !pending.isEmpty else { return }
-        isProcessing = true
-        let docID = pending.removeFirst()
+        guard currentDocumentID == nil, !pending.isEmpty else { return }
+        let job = pending.removeFirst()
+        currentDocumentID = job.documentID
         pendingCount = pending.count
-        Task {
-            await process(docID)
-            isProcessing = false
+        processingTask = Task {
+            if job.speakersOnly {
+                await analyzeSpeakers(job.documentID, forceImports: true)
+            } else {
+                await transcribe(job.documentID)
+            }
+            progress[job.documentID] = nil
+            livePreview[job.documentID] = nil
+            currentDocumentID = nil
+            processingTask = nil
             pump()
         }
     }
 
-    private func process(_ docID: UUID) async {
+    private func transcribe(_ docID: UUID) async {
         guard let library, let modelManager,
-              var doc = library.document(id: docID) else { return }
-
-        doc.status = .transcribing
-        library.update(doc)
+              var original = library.document(id: docID) else { return }
+        original.status = .transcribing
+        original.failureReason = nil
+        library.update(original)
         progress[docID] = 0
 
         let language = UserDefaults.standard.string(forKey: "language") ?? ""
         let translate = UserDefaults.standard.bool(forKey: "translate")
-        let recognizeSpeakers = UserDefaults.standard.bool(forKey: "automaticSpeakerRecognition")
-        let recognizeKnownVoices = VoiceProfileStore.shared.isRecognitionEnabled
         let model = modelManager.selectedVariant
         let startedAt = Date()
-
         do {
+            try Task.checkCancellation()
+            let folder = library.folder(for: docID)
+            let inputs = try Self.transcriptionInputs(for: original, folder: folder)
+            var omitted = inputs.omitted
+            original.transcriptionWarning = Self.recoveryWarning(omitted: omitted)
+            library.update(original)
             try await transcriber.load(model: model)
-
             var allSegments: [TranscriptSegment] = []
-            var allVoiceprints: [String: [Float]] = [:]
-            var suggestedSpeakers: [String] = []
-            var didDiarize = false
-            let folder = LibraryStore.folder(for: doc.id)
-            let tracks = doc.tracks
-            for (index, track) in tracks.enumerated() {
-                let url = folder.appendingPathComponent(track.fileName)
-                let trackCount = Double(tracks.count)
+            var completedTracks = 0
+            let trackCount = Double(inputs.tracks.count)
+            for (index, track) in inputs.tracks.enumerated() {
+                try Task.checkCancellation()
                 let base = Double(index) / trackCount
-                var segments = try await transcriber.transcribe(
-                    file: url,
-                    source: track.source,
-                    language: language.isEmpty ? nil : language,
-                    translate: translate,
-                    onProgress: { [weak self] fraction, text in
-                        Task { @MainActor in
-                            self?.progress[docID] = base + fraction / trackCount
-                            self?.livePreview[docID] = text
-                        }
-                    }
-                )
-                if let speaker = track.speakerName {
-                    for segmentIndex in segments.indices {
-                        segments[segmentIndex].speaker = speaker
-                    }
-                } else if recognizeSpeakers,
-                          !(doc.isMeetingRecording && track.source == .microphone) {
-                    livePreview[docID] = "Recognizing speakers locally…"
-                    progress[docID] = base + 0.92 / trackCount
-                    do {
-                        let diarization = try await speakerDiarizer.intervals(for: url)
-                        didDiarize = true
-                        segments = SpeakerDiarizer.assignSpeakers(
-                            to: segments,
-                            using: diarization.intervals
-                        )
-                        for rawID in diarization.voiceprints.keys.sorted() {
-                            guard let embedding = diarization.voiceprints[rawID],
-                                  let assignedLabel = diarization.speakerLabels[rawID] else { continue }
-                            var finalLabel = assignedLabel
-                            if recognizeKnownVoices,
-                               let match = VoiceProfileStore.shared.match(embedding: embedding) {
-                                switch VoiceProfileStore.matchTier(for: match.distance) {
-                                case .apply:
-                                    finalLabel = match.name
-                                    for segmentIndex in segments.indices
-                                        where segments[segmentIndex].speaker == assignedLabel {
-                                        segments[segmentIndex].speaker = match.name
-                                    }
-                                case .suggest:
-                                    suggestedSpeakers.append(match.name)
-                                case .none:
-                                    break
-                                }
+                var segments: [TranscriptSegment]
+                do {
+                    segments = try await transcriber.transcribe(
+                        file: folder.appendingPathComponent(track.fileName), source: track.source,
+                        language: language.isEmpty ? nil : language, translate: translate,
+                        onProgress: { [weak self] fraction, text in
+                            Task { @MainActor in
+                                guard let self, self.currentDocumentID == docID,
+                                      self.library?.document(id: docID)?.status == .transcribing else { return }
+                                self.progress[docID] = base + fraction / trackCount
+                                self.livePreview[docID] = text
                             }
-                            Self.addVoiceprint(embedding, for: finalLabel, to: &allVoiceprints)
                         }
-                    } catch {
-                        // Diarization is an enhancement. A missing model or
-                        // unsupported audio must never discard a good Whisper
-                        // transcript.
-                        DiagLog.log("speaker recognition skipped for document %@: %@", docID.uuidString, error.localizedDescription)
+                    )
+                    completedTracks += 1
+                } catch {
+                    try Task.checkCancellation()
+                    if case Transcriber.TranscriberError.cancelled = error { throw error }
+                    guard original.recoveredAt != nil else { throw error }
+                    omitted.append(Self.sourceDescription(for: track))
+                    continue
+                }
+                let offset = track.startOffset ?? 0
+                for index in segments.indices {
+                    segments[index].start += offset
+                    segments[index].end += offset
+                    segments[index].words = segments[index].words?.map {
+                        var word = $0
+                        word.start += offset
+                        word.end += offset
+                        return word
+                    }
+                    if track.source == .microphone {
+                        segments[index].speaker = original.microphoneSpeakerName ?? "You"
+                    } else if let name = track.speakerName {
+                        segments[index].speaker = name
+                    } else if track.source == .system {
+                        segments[index].speaker = original.expectedRemoteSpeakerCount == 1
+                            ? "Speaker 1" : "Unanalyzed audio"
                     }
                 }
                 allSegments.append(contentsOf: segments)
             }
-
+            try Task.checkCancellation()
+            guard completedTracks > 0 else {
+                throw Self.inputError("None of the recovered audio sources could be transcribed. The media has been kept.", omitted: omitted)
+            }
             allSegments.sort { $0.start < $1.start }
-            if let replacementStore {
-                allSegments = replacementStore.apply(to: allSegments)
+            guard var fresh = library.document(id: docID) else { return }
+            // Keep the earliest raw transcript and any edits made while this
+            // transcription was running.
+            fresh.rawSegments = fresh.rawSegments ?? allSegments
+            if fresh.segments == original.segments {
+                fresh.segments = allSegments
+                fresh.speakers = nil
+                fresh.normalizeSpeakerIdentities()
             }
-            doc.segments = allSegments
-            if didDiarize {
-                doc.speakerVoiceprints = allVoiceprints.isEmpty ? nil : allVoiceprints
-            }
-            let detectedSpeakers = allSegments.compactMap(\.speaker).filter { !$0.isEmpty }
-            // Detected speakers are real; never cap them. Only the calendar
-            // suggestions below are limited.
-            doc.knownSpeakers = Self.mergedKnownSpeakers(doc.knownSpeakers, adding: detectedSpeakers, limit: Int.max)
-            doc.knownSpeakers = Self.mergedKnownSpeakers(
-                doc.knownSpeakers,
-                adding: suggestedSpeakers,
-                limit: Int.max
-            )
-            if let eventID = doc.calendarEventID {
-                let attendeeNames = attendeeNamesProvider?(eventID) ?? []
-                doc.knownSpeakers = Self.mergedKnownSpeakers(
-                    doc.knownSpeakers,
-                    adding: attendeeNames,
-                    limit: max(8, (doc.knownSpeakers ?? []).count)
-                )
-            }
-            doc.status = .ready
-            doc.modelUsed = model
-            doc.language = language.isEmpty ? nil : language
-            DiagLog.log(
-                "transcription completed for document %@ using model %@: %.1fs, %d segments",
-                docID.uuidString,
-                model,
-                Date().timeIntervalSince(startedAt),
-                allSegments.count
-            )
-        } catch {
-            doc.status = .failed
-            doc.failureReason = error.localizedDescription
-            DiagLog.log(
-                "transcription failed for document %@ using model %@ after %.1fs: %@",
-                docID.uuidString,
-                model,
-                Date().timeIntervalSince(startedAt),
-                error.localizedDescription
-            )
-        }
-
-        progress[docID] = nil
-        livePreview[docID] = nil
-        // Re-read in case the user renamed/edited while transcribing.
-        if var fresh = library.document(id: docID) {
-            fresh.segments = doc.segments
-            fresh.status = doc.status
-            fresh.modelUsed = doc.modelUsed
-            fresh.language = doc.language
-            fresh.failureReason = doc.failureReason
-            fresh.speakerVoiceprints = doc.speakerVoiceprints
-            fresh.knownSpeakers = Self.mergedKnownSpeakers(fresh.knownSpeakers, adding: doc.knownSpeakers ?? [], limit: Int.max)
+            fresh.status = .ready
+            fresh.modelUsed = model
+            fresh.language = language.isEmpty ? nil : language
+            fresh.failureReason = nil
+            fresh.transcriptionWarning = Self.recoveryWarning(omitted: omitted)
             library.update(fresh)
-            if fresh.status == .ready {
-                Exporter.exportAutomaticallyIfNeeded(fresh)
-            }
+            await analyzeSpeakers(docID, forceImports: false, applyCleanup: true)
+            DiagLog.log("transcription completed for document %@ using model %@: %.1fs, %d segments",
+                        docID.uuidString, model, Date().timeIntervalSince(startedAt), allSegments.count)
+        } catch {
+            guard var fresh = library.document(id: docID) else { return }
+            fresh.status = .failed
+            fresh.failureReason = error.localizedDescription
+            library.update(fresh)
+            DiagLog.log("transcription failed for document %@: %@", docID.uuidString, error.localizedDescription)
         }
     }
 
-    private nonisolated static func addVoiceprint(
-        _ embedding: [Float],
-        for name: String,
-        to voiceprints: inout [String: [Float]]
-    ) {
-        if let existing = voiceprints[name], existing.count == embedding.count {
-            voiceprints[name] = VoiceProfileStore.normalized(
-                zip(existing, embedding).map { ($0 + $1) / 2 }
-            )
-        } else {
-            voiceprints[name] = embedding
+    private func analyzeSpeakers(_ docID: UUID, forceImports: Bool, applyCleanup: Bool = false) async {
+        guard let library, var baseline = library.document(id: docID) else { return }
+        baseline.speakerAnalysisStatus = .running
+        baseline.speakerAnalysisError = nil
+        library.update(baseline)
+        livePreview[docID] = "Analyzing remote speakers locally…"
+        progress[docID] = nil
+        let model = SpeakerDetectionModel.selected
+        let diarizer = speakerDiarizer
+        let analysis = await SpeakerAnalysis.run(
+            baseline, folder: library.folder(for: docID), model: model,
+            analyzeImports: forceImports || UserDefaults.standard.bool(forKey: "automaticSpeakerRecognition"),
+            splitAtSpeakerChanges: baseline.speakerEditsApplied != true
+        ) { url, model, count in
+            try await diarizer.intervals(for: url, model: model, expectedSpeakerCount: count)
         }
+        guard var fresh = library.document(id: docID) else { return }
+        let unchanged = fresh.segments == baseline.segments && fresh.speakers == baseline.speakers
+        fresh = SpeakerAnalysis.applying(analysis, to: fresh, basedOn: baseline)
+        if applyCleanup, unchanged, let replacementStore {
+            fresh.segments = replacementStore.apply(to: fresh.segments)
+        }
+        if let eventID = fresh.calendarEventID {
+            fresh.knownSpeakers = Self.mergedKnownSpeakers(
+                fresh.knownSpeakers, adding: attendeeNamesProvider?(eventID) ?? [],
+                limit: max(8, (fresh.knownSpeakers ?? []).count)
+            )
+        }
+        library.update(fresh)
+        if fresh.status == .ready { Exporter.exportAutomaticallyIfNeeded(fresh) }
     }
 }
