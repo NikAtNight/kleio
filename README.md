@@ -1,4 +1,4 @@
-# Scribe
+# Kleio
 
 A native macOS meeting recorder with local transcription and speaker review. Requires macOS 15 or later. Recording, transcription, and speaker detection run on the Mac; models need a one-time download.
 
@@ -38,7 +38,9 @@ To package the app using the existing signing and model pre-warming script:
 ./scripts/make-app.sh
 ```
 
-That script creates `build/Scribe.app`. Its `--install` option replaces the installed app in `/Applications` and relaunches it.
+That script creates `build/Kleio.app`. Its `--install` option quits the existing app normally, backs up the old Scribe or Kleio app, and installs `/Applications/Kleio.app`. It stops if the app cannot finish saving. Add `--prewarm` to exercise the selected transcription model after packaging.
+
+This is a development build for this checkout. Bundled SwiftPM resources retain build-path fallbacks; clean-machine packaging and notarization still need validation.
 
 Grant Microphone and System Audio Recording access when recording. Video uses the native screen-sharing picker and the corresponding macOS permission flow. Dictation insertion also needs Accessibility access; otherwise it copies the result to the clipboard.
 
@@ -50,5 +52,7 @@ The automated tests cover domain behavior and generated media. Real meeting accu
 - Core Audio process taps select app/helper processes. ScreenCaptureKit and AVAssetWriter handle optional video. `RecordingClock` and `TimelineAudioWriter` keep both audio sources aligned and preserve interruptions as silence.
 - [WhisperKit](https://github.com/argmaxinc/WhisperKit) handles local transcription; [FluidAudio](https://github.com/FluidInference/FluidAudio) supplies Core ML speaker models. Speaker analysis never downloads models implicitly.
 - Each library document lives in `~/Library/Application Support/Scribe/library/<uuid>/`, with `document.json` and its media files. Optional manifest fields preserve compatibility with older documents.
+- The Kleio rename preserves the `app.talix.scribe` bundle identifier, existing preferences, and Scribe storage paths. The Swift module remains `Scribe`; the executable and visible app name are `Kleio`.
 - Saved people are local names, independent of the legacy voice-profile store. Original media and raw transcription remain available through speaker corrections.
-- `Scribe --transcribe <file> [model]` runs headless transcription.
+- `Kleio --transcribe <file> [model]` runs headless transcription.
+- `Kleio --benchmark-speakers <audio> <reference.json> <report.json>` compares local speaker intervals with annotated audio. It refuses to replace an existing report. See [the benchmark format and measured limits](docs/meeting-recorder-validation.md#local-speaker-inference-smoke-check).

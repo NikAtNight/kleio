@@ -93,14 +93,14 @@ struct MenuBarView: View {
             Divider()
         }
 
-        Button("Open Scribe") {
+        Button("Open Kleio") {
             openMain()
         }
         SettingsLink {
             Text("Settings…")
         }
         Divider()
-        Button("Quit Scribe") {
+        Button("Quit Kleio") {
             NSApp.terminate(nil)
         }
     }

@@ -106,7 +106,7 @@ struct CalendarSettingsView: View {
                     }
 
                     if calendarSync.autoRecordEnabled {
-                        Text("Scribe checks for a call locally, then gives you 10 seconds to cancel before recording starts.")
+                        Text("Kleio checks for a call locally, then gives you 10 seconds to cancel before recording starts.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
@@ -154,7 +154,7 @@ struct CalendarSettingsView: View {
                             set: { calendarSync.storesAutoRecordEventDetails = $0 }
                         ))
 
-                        Text("Audio, call detection, and transcription stay on this Mac. Scribe does not save attendees or calendar notes.")
+                        Text("Audio, call detection, and transcription stay on this Mac. Kleio does not save attendees or calendar notes.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -238,7 +238,7 @@ private struct AutoRecordConsentSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Before auto-recording")
                 .font(.title2.bold())
-            Text("Scribe records and transcribes calls on this Mac. Nothing from auto-recording is uploaded.")
+            Text("Kleio records and transcribes calls on this Mac. Nothing from auto-recording is uploaded.")
             Text("Recording laws differ by location. You are responsible for telling everyone on the call that you are recording and getting any consent the law requires.")
             HStack {
                 Spacer()

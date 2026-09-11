@@ -564,7 +564,7 @@ final class AutoRecordArbiter: ObservableObject {
         guard isBundledApp else { return }
         let content = UNMutableNotificationContent()
         content.title = "Another meeting is ready"
-        content.body = "Scribe is recording \(active.title). Stop it and switch to \(waiting.title)?"
+        content.body = "Kleio is recording \(active.title). Stop it and switch to \(waiting.title)?"
         content.sound = .default
         content.categoryIdentifier = Self.overlapCategoryIdentifier
         content.userInfo = ["eventID": waiting.eventID]

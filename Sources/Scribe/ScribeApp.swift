@@ -2,15 +2,15 @@ import SwiftUI
 import AppKit
 import UserNotifications
 
-/// Entry point: `Scribe --transcribe <file> [model]` runs a headless
+/// Entry point: `Kleio --transcribe <file> [model]` runs a headless
 /// transcription (used by make-app.sh to pre-warm the CoreML cache and by
 /// automated tests); anything else launches the app.
 @main
 enum Main {
     /// `--test-tap <logfile>`: start the system tap, capture for 5 s, then
     /// write diagnostics (callback count, format, bytes captured) and exit.
-    /// Launch via `open -n -a Scribe --args --test-tap /path/log` so TCC
-    /// attributes the audio-capture permission to Scribe itself.
+    /// Launch via `open -n -a Kleio --args --test-tap /path/log` so TCC
+    /// attributes the audio-capture permission to Kleio itself.
     static func runTapTest(logPath: String) {
         var lines: [String] = []
         func logLine(_ s: String) {
@@ -44,6 +44,19 @@ enum Main {
 
     static func main() {
         let args = CommandLine.arguments
+        if args.dropFirst().first == "--benchmark-speakers" {
+            Task.detached {
+                do {
+                    try await SpeakerBenchmark.run(arguments: Array(args.dropFirst(2)))
+                    exit(0)
+                } catch {
+                    FileHandle.standardError.write(Data("error: \(error.localizedDescription)\n".utf8))
+                    exit(1)
+                }
+            }
+            RunLoop.main.run()
+            return
+        }
         if let i = args.firstIndex(of: "--test-tap"), args.count > i + 1 {
             runTapTest(logPath: args[i + 1])
             return
@@ -123,7 +136,7 @@ struct ScribeApp: App {
     @StateObject private var autoRecordArbiter = AutoRecordArbiter()
 
     var body: some Scene {
-        WindowGroup("Scribe", id: "main") {
+        WindowGroup("Kleio", id: "main") {
             ContentView()
                 .environmentObject(library)
                 .environmentObject(modelManager)
@@ -238,7 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if Bundle.main.bundleURL.pathExtension == "app" {
             let center = UNUserNotificationCenter.current()
             let join = UNNotificationAction(identifier: "MEETING_JOIN", title: "Join", options: [.foreground])
-            let openScribe = UNNotificationAction(identifier: "MEETING_OPEN_SCRIBE", title: "Open Scribe", options: [.foreground])
+            let openScribe = UNNotificationAction(identifier: "MEETING_OPEN_SCRIBE", title: "Open Kleio", options: [.foreground])
             let cancelAutoRecord = UNNotificationAction(
                 identifier: AutoRecordArbiter.cancelActionIdentifier,
                 title: "Cancel",

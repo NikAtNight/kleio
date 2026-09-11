@@ -61,7 +61,7 @@ The user authorized replacing `/Applications/Scribe.app`. The replacement was si
 
 User review of the installed dashboard and transcript view found crowded controls, heavy transcript cards, and too little reading space. Native rendering checks established that the views render; the intended visual refinement remains unfinished.
 
-Not run: real Zoom/Teams/Meet/Slack recordings, speaker-model downloads or actual diarization inference, microphone clock/device transitions, permission flows, long sessions, and abrupt-crash movie recovery. No private meeting audio was used. Use [the native acceptance checklist](../meeting-recorder-validation.md) for these checks.
+At the first build, real Zoom/Teams/Meet/Slack recordings, speaker-model downloads or actual diarization inference, microphone clock/device transitions, permission flows, long sessions, and abrupt-crash movie recovery had not been run. The refinement results below supersede those gaps where stated. No private meeting audio was used. Use [the native acceptance checklist](../meeting-recorder-validation.md) for the remaining checks.
 
 ## Corrections and model limits
 
@@ -70,3 +70,36 @@ Saved-person creation is an explicit checkbox. Choosing or renaming a document s
 The microphone remains fixed. One-other-person mode bypasses both diarization models and yields one remote label. Community-1 uses a supplied count as a clustering constraint. Sortformer requires a declared two to four remote participants and can still produce false splits within its four output groups. Uncertain and unanalyzed audio are review labels, excluded from the dashboard's participant count.
 
 Speaker retry preserves corrected text and speaker assignments, including edits made while analysis was running. Interrupted analysis is recoverable without retranscribing. A partial recovered transcript names omitted sources in a persistent warning. Failed final saves preserve media and a pending manifest, protect the document from deletion, and expose Retry save.
+
+## Kleio refinement and validation
+
+The user authorized parallel refinement after committing the first build as `4fe4ff0`, then chose the standalone name Kleio. Main owns integration and this record. The transcript, speaker-validation, and capture-validation lanes used separate worktrees at that commit.
+
+- `ContentView.swift` now has a narrower sidebar without waveform thumbnails, a compact microphone/count options popover, a persistent video switch, app tiles, and a grouped recent-recordings list. The native sidebar keeps Home accessible when the library is empty.
+- `TranscriptView.swift` groups consecutive speaker headings visually while retaining every original segment and timestamp. Reading text is 16 points, cards are removed, and People starts closed. Below 880 points of detail width, People opens as a popover. Search hits retain individual speaker headings. `TranscriptReadingLayoutTests` exercises identity, source, and note boundaries.
+- The visible name and SwiftPM product are Kleio. The Scribe module, `app.talix.scribe` identifier, preferences, and storage paths stay unchanged to retain existing data and permissions. `scripts/make-app.sh` packages Kleio, verifies signing, stages installation, requests normal termination, and backs up replaced apps. It refuses to replace unrelated apps or continue while the existing app is still saving.
+- `SpeakerBenchmark` is a diagnostic CLI used by the public-fixture checks. It uses the existing `SpeakerDiarizer` and `SpeakerAnalysis` paths, refuses existing report paths, and reports interval coverage with explicit scoring limits. It does not upload audio or infer identity accuracy from a correct count.
+- `RecordingClock.captureSlices` retains all active portions of buffers crossing pause/resume boundaries. `TimelineAudioWriter` uses those slices for both microphone and app audio. Video finalization retains its first completed duration, and one-second movie fragments reduce the amount at risk before an abrupt exit.
+- Restart recovery publishes a stopped or failed-analysis state even when the recovery manifest cannot be written. Existing media and the on-disk crash marker remain available, and the write error stays visible.
+
+Measured checks:
+
+- PASS: Community-1 detected two groups in the public annotated two-speaker fixture and one in exclusive single-speaker excerpts. It still misassigned short speech. A constructed two-real-plus-one-synthetic fixture produced three groups. These are smoke checks, not accuracy claims about actual meetings. See [source links, timings, scoring definitions, and limits](../meeting-recorder-validation.md#local-speaker-inference-smoke-check).
+- PASS: native capture of only a generated test window, with no audio capture. Decoding verified pre-pause blue frames, resumed green frames, and no red frames displayed during pause. Existing screen authorization was sufficient; no permission changes or picker interactions occurred.
+- PASS: generated audio/video playback composition, pause boundaries, exact sample values, repeated finalization, and failed recovery persistence. A subprocess exiting without finalizing a two-second generated movie left 1.1 seconds and 30 frames decodable with one-second fragments. The old five-second interval left that short movie unreadable.
+- PASS: read-only app process resolution found Slack, Teams, and Zen processes and reported a stopped Safari unavailable. This does not establish which audio a live meeting provides through those process taps.
+
+Remaining manual acceptance: actual Zoom/Teams/Meet/Slack audio, microphone identity with speakerphone echo, window/display picker interaction, device and Bluetooth transitions, sleep/wake, long sessions, and held-out natural multi-person calls. Completed movie fragments can recover; the final open fragment and every disk failure are not guaranteed recoverable. Clean-machine packaging and notarization remain unverified.
+
+Integration evidence after the refinement:
+
+- PASS: `swift test --disable-automatic-resolution`, 124 tests with zero failures. This excludes the temporary native rendering helper, which was removed after its final successful run.
+- PASS: `./scripts/make-app.sh`, including a release build of the Kleio product and code-signature verification. Existing dependency/debug-cache warnings remain; no authored-source warning was reported.
+- PASS: native window captures in light/dark appearances, a 940-point window with video setup visible, transcript reading, and native People/error-details popover interactions using generated fixtures. App launch and real meeting acceptance are separate checks.
+- PASS: packaged Kleio transcribed locally generated speech and detected two groups from the public annotated fixture.
+- PASS: fresh read-only review of UI, branding, report output safety, packaging, and capture changes. No concrete findings remain.
+- PASS: `git diff --check`, `bash -n scripts/make-app.sh`, and `plutil -lint Resources/Info.plist`.
+
+Evidence is retained under ignored `build/kleio-review/`, with native previews, speaker/capture fixtures and reports, and build/test logs. The first rebuild is commit `4fe4ff0`; refinement evidence refers to the changes since that commit.
+
+Installed `/Applications/Kleio.app` after checking that all five existing documents were ready. The old app is backed up at `build/app-backups/install.Bsyypg/Scribe.app`. Code-signature verification passed, the installed executable matches the tested package, the app opened a window, and all five pre-existing document manifests remained byte-for-byte unchanged.

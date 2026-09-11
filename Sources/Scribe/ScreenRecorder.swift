@@ -158,12 +158,13 @@ final class TimelineVideoWriter {
     private var lastSample: CMSampleBuffer?
     private var backpressureStarted: TimeInterval?
     private var finished = false
+    private var finalizedDuration: TimeInterval?
     private(set) var startOffset: TimeInterval?
 
     init(url: URL, width: Int, height: Int, clock: RecordingClock) throws {
         self.clock = clock
         writer = try AVAssetWriter(outputURL: url, fileType: .mov)
-        writer.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
+        writer.movieFragmentInterval = CMTime(seconds: 1, preferredTimescale: 600)
         input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
@@ -202,12 +203,13 @@ final class TimelineVideoWriter {
 
     func finish() async throws -> TimeInterval {
         if finished {
-            guard writer.status == .completed else { throw writer.error ?? CaptureError.noFrames }
-            return max(0, clock.time() - (startOffset ?? 0))
+            guard writer.status == .completed, let finalizedDuration else { throw writer.error ?? CaptureError.noFrames }
+            return finalizedDuration
         }
         finished = true
         guard let lastSample else { writer.cancelWriting(); throw CaptureError.noFrames }
         let duration = max(clock.time() - (startOffset ?? 0), lastSample.presentationTimeStamp.seconds + 1 / 30)
+        finalizedDuration = duration
         writer.endSession(atSourceTime: CMTime(seconds: duration, preferredTimescale: 60_000))
         input.markAsFinished()
         if writer.status == .writing { await writer.finishWriting() }

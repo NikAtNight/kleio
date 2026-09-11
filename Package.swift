@@ -2,10 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "Scribe",
+    name: "Kleio",
     platforms: [
         .macOS(.v15)
     ],
+    products: [.executable(name: "Kleio", targets: ["Scribe"])],
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.4")

@@ -42,3 +42,74 @@ Use the same unedited remote audio for each model. Keep a small set of manually 
 Do not compare benchmark percentages from different datasets or scoring rules. Do not claim that a model is more accurate for Scribe until the same recordings have been evaluated. A lower word error rate from Whisper or Parakeet does not establish better speaker grouping.
 
 Primary model references: [Pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), [NVIDIA Sortformer v2.1](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1), and the pinned FluidAudio documentation in `.build/checkouts/FluidAudio/Documentation/Diarization/`.
+
+## Local speaker inference smoke check
+
+On September 10, 2026, Community-1 ran through the application actor on a public, annotated 30-second recording. This is one smoke fixture, not a meeting-accuracy benchmark or a comparison against MacWhisper.
+
+Environment: Apple M5 Pro, 64 GiB memory, macOS 26.6.2. FluidAudio remains pinned to 0.15.5. The [Community-1 Core ML assets](https://huggingface.co/FluidInference/speaker-diarization-coreml/tree/1ed7a662fdc7109e36d822db793ee6eebdaf8594) had 21,599,417 required bytes in repository metadata. The local cache occupies 21,776,918 bytes after loading. Download plus model preparation took 9.48 seconds. No paid service, private recording, capture permission, or global preference change was involved.
+
+The [pyannote tutorial fixture and RTTM](https://github.com/pyannote/pyannote-audio/tree/2.1.1/tutorials/assets) contain two anonymized real speakers, 22.46 seconds of annotated speech, and 1.89 seconds where both reference speakers are active. The one-speaker derivative concatenates exclusive speaker91 excerpts at 14.8 to 17.8 and 22.0 to 27.5 seconds from that same recording. It is 8.5 seconds long. Those edited excerpts are not a natural continuous meeting.
+
+| Input | Mode | Output groups | Analysis wall time |
+| --- | --- | --- | --- |
+| Original 30-second sample | Automatic, first inference | 2 | 4.04 s |
+| Original 30-second sample | Automatic, warm rerun | 2 | 0.384 s |
+| Original 30-second sample | Known count 2 | 2 | 0.380 s |
+| 8.5-second one-speaker derivative | Automatic | 1 | 0.246 s |
+| 8.5-second one-speaker derivative | Known count 1 | 1 by policy | 0.00033 s |
+
+Analysis timing includes cached-model loading when the actor has not prepared it. The first run followed the download; later runs benefited from system compilation/cache state. The one-person result uses the application's bypass and performs no model inference or speech detection, so it has no accuracy metrics.
+
+Both two-person runs produced the same assignments. Correct counting did not imply perfect attribution. Reference speaker91's exclusive speech overlapped the other speaker's main cluster for 0.869 seconds cumulatively. About 0.731 seconds came from the short reply at 7.55 to 8.35 seconds; the remainder came from other boundary errors. There was also 0.218 seconds of secondary-cluster overlap for reference speaker90, below the report's 0.25-second split/merge pairing threshold. The model left 0.098 seconds of annotated speech uncovered. Automatic analysis of the one-speaker derivative produced no extra group and left 0.028 seconds uncovered. No thresholds or model settings were tuned to this sample.
+
+Scoring definitions:
+
+- The report partitions the union of reference and detected interval boundaries, without rounding to frames.
+- Reference speech duration is the union of annotated speaker activity. Unannotated silence is excluded from identity and missed-speech calculations. Extra detected activity during silence is not scored by this diagnostic.
+- Missing speech means reference activity with no detected cluster active. During overlapping reference speech, one detected cluster is sufficient for this coverage check; it does not measure recovery of both voices.
+- The identity overlap matrix uses only intervals with exactly one reference speaker. The 1.89 seconds of overlapping reference speech are reported separately and excluded from this matrix.
+- There is no boundary collar. Timing errors close to reference boundaries contribute to the overlap values.
+- A reference voice with at least 0.25 seconds in each of multiple clusters triggers the split indicator. A cluster with at least 0.25 seconds from each of multiple reference voices triggers the merge indicator. These flags can both trigger even when the overall group count is correct. They are diagnostic flags, not standard DER, JER, or a speaker-identification score.
+- Clip-identity references get no speech-accuracy metrics, since whole clips can include silence.
+
+Artifacts: `/tmp/scribe-speaker-validation/` contains the source audio/RTTM, JSON references, model metadata, run logs, and JSON reports. Audio SHA-256 is `c319b4abca767b124e41432d364fd7df006cb26bb79d09326c487d606a134e6e`; RTTM SHA-256 is `d78fe62c69d8e6dcbb42c26adfce83faccb374c5a1e6d987fe37f85f1c173c87`. Main can retain these under an ignored build artifact directory. No media or downloaded model is part of the patch.
+
+## Reproduce with a local reference
+
+After building, invoke:
+
+```sh
+./.build/debug/Kleio --benchmark-speakers /path/audio.wav /path/reference.json /path/report.json --count 2
+```
+
+Omit `--count` for automatic counting. `--count 1` exercises the application bypass. `--model sortformer` selects the existing optional backend and still requires its supported declared count. `--download-models` is the explicit optional model-download action; it never uploads audio. Without that flag, analysis only reads cached models.
+
+Reference format:
+
+```json
+{
+  "annotationKind": "speechActivity",
+  "source": "Description or source URL for the annotations",
+  "turns": [
+    {"speaker": "A", "start": 0.5, "end": 2.0},
+    {"speaker": "B", "start": 2.2, "end": 4.1}
+  ]
+}
+```
+
+Use `clipIdentity` instead of `speechActivity` when labels cover complete clips rather than annotated speech. The output intentionally omits accuracy metrics for those references. Names are arbitrary consistent labels, and intervals can overlap. The CLI rejects invalid intervals and refuses to replace existing output files, including aliases of the audio or reference files.
+
+Tests use known interval fixtures to verify silence exclusion, overlap exclusion, split/merge counting, safe output paths, and the no-model single-person report. They do not establish long-call performance or model accuracy. Still untested: real conferencing compression, echoes, distant voices, device changes, more than two speakers, long-session drift, Sortformer inference, and end-to-end ASR word alignment on this public recording.
+
+## Constructed three-voice diagnostic
+
+A separate 71.065-second fixture combines the existing public two-speaker pyannote sample with a locally generated third voice. The order is the original sample at 0 to 30 seconds, silence at 30 to 31, macOS Daniel speech at 31 to 40.065, silence at 40.065 to 41.065, and the original sample repeated at 41.065 to 71.065. Daniel was generated with `/usr/bin/say -v Daniel -r 170 --data-format=LEI16@16000 --file-format=WAVE`; its text and all boundaries are in `multi-fixture.json`.
+
+This is a constructed mixture of two real voices and one synthetic voice, not a natural three-person meeting. The repeated real excerpts test whether the original two groups survive insertion of the third voice; they do not add independent human speakers or new human speech.
+
+Community-1 produced three groups with automatic counting in 0.908 seconds and with known count 3 in 0.642 seconds. Both modes produced the same assignment intervals. The two original voices retained their dominant groups S1 and S2; the synthetic clip occupied S3. The synthetic clip had 9.065 seconds of S3 coverage, with no S1/S2 coverage. That is whole-clip coverage, including possible pauses, and is not a speech-accuracy score.
+
+For the duplicated real audio, the RTTM supplies 44.92 seconds of speech activity. Of that, 3.78 seconds contains overlapping reference speech and is excluded from identity comparison. No boundary collar is applied. Silence is excluded. A total of 0.183 seconds of reference speech has no detected cluster. On exclusive speech, speaker90 overlaps its dominant S1 group for 19.866 seconds and S2 for 0.412 seconds; speaker91 overlaps its dominant S2 group for 19.549 seconds and S1 for 1.874 seconds. Pairings can overlap when the model emits two groups, so these columns are not a partition or a DER score. Correct group count again coexists with local attribution errors.
+
+`multi-auto.json` and `multi-known-3.json` are the CLI reports. Their generic accuracy metrics are omitted because the combined reference is explicitly marked `clipIdentity`. `multi-summary.json` computes coverage separately for the human speech annotations and the whole synthetic clip, with definitions and limitations included. No source, inference setting, package, preference, capture state, or model asset changed for this check.

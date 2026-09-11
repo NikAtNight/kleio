@@ -58,7 +58,7 @@ final class LibraryStore: ObservableObject {
         for var doc in documents where doc.status == .ready && doc.speakerAnalysisStatus == .running {
             doc.speakerAnalysisStatus = .failed
             doc.speakerAnalysisError = "Speaker analysis was interrupted. Retry speaker analysis to continue."
-            update(doc)
+            publishRecovery(doc)
         }
         for var doc in documents where [.recording, .transcribing, .queued].contains(doc.status) {
             let folder = folder(for: doc.id)
@@ -69,8 +69,22 @@ final class LibraryStore: ObservableObject {
             doc.status = .recovered
             doc.recoveredAt = doc.recoveredAt ?? Date()
             doc.failureReason = "Recording was interrupted. Available audio and video have been kept. Review the files before retrying transcription."
-            update(doc)
+            publishRecovery(doc)
         }
+    }
+
+    private func publishRecovery(_ doc: ScribeDocument) {
+        guard !update(doc), let index = documents.firstIndex(where: { $0.id == doc.id }) else { return }
+        // A save failure cannot make a session from an earlier process active again.
+        // Keep the on-disk crash marker and expose a retryable state in this process.
+        var recovered = doc
+        let saveError = lastError ?? "The recovery state could not be saved."
+        if recovered.status == .recovered {
+            recovered.failureReason = (recovered.failureReason ?? "") + " " + saveError
+        } else {
+            recovered.speakerAnalysisError = (recovered.speakerAnalysisError ?? "") + " " + saveError
+        }
+        documents[index] = recovered
     }
 
     @discardableResult

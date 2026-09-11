@@ -2,6 +2,31 @@ import SwiftUI
 import AppKit
 import AVKit
 
+/// Chooses visible headings without combining or rewriting transcript segments.
+func transcriptSpeakerGroupStarts(in rows: [TranscriptTimelineRow]) -> Set<UUID> {
+    var starts = Set<UUID>()
+    var previous: TranscriptSegment?
+    for row in rows {
+        guard case .segment(let segment) = row else {
+            previous = nil
+            continue
+        }
+        let sameSpeaker: Bool
+        if let previous, previous.source == segment.source {
+            if previous.speakerID != nil || segment.speakerID != nil {
+                sameSpeaker = previous.speakerID == segment.speakerID
+            } else {
+                sameSpeaker = previous.speaker == segment.speaker
+            }
+        } else {
+            sameSpeaker = false
+        }
+        if !sameSpeaker { starts.insert(segment.id) }
+        previous = segment
+    }
+    return starts
+}
+
 /// The document view: header and tabs for a summary, transcript, and notes,
 /// with a player bar at the bottom.
 struct TranscriptView: View {
@@ -26,7 +51,8 @@ struct TranscriptView: View {
     @State private var showFindReplace = false
     @State private var matchCase = false
     @State private var replaceResult: String?
-    @State private var showPeople = true
+    @State private var showPeople = false
+    @State private var showSpeakerStatus = false
     @State private var editingSpeaker: DocumentSpeaker?
     @State private var showVideo = true
     @State private var newSpeakerName = ""
@@ -57,6 +83,13 @@ struct TranscriptView: View {
         )
     }
 
+    private var speakerGroupStarts: Set<UUID> {
+        // Search hits retain their own headings because omitted turns may
+        // belong to someone else.
+        if !transcriptSearch.isEmpty { return Set(visibleSegments.map(\.id)) }
+        return transcriptSpeakerGroupStarts(in: timelineRows)
+    }
+
     private var activeSegmentID: UUID? {
         guard playback.documentID == document.id else { return nil }
         let time = playback.currentTime
@@ -81,16 +114,6 @@ struct TranscriptView: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 12)
             }
-            Divider()
-            Picker("Document section", selection: $selectedTab) {
-                ForEach(DocumentTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
             Divider()
             tabContent
             Divider()
@@ -151,30 +174,38 @@ struct TranscriptView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             TextField("Title", text: $title)
                 .textFieldStyle(.plain)
-                .font(Theme.displayTitle(size: 30))
+                .font(.system(size: 22, weight: .semibold))
                 .onSubmit(commitTitle)
 
-            HStack(spacing: 0) {
-                Text(document.createdAt.formatted(date: .abbreviated, time: .shortened))
-                Text(" · ")
-                Text(document.duration.clockString)
-                if let model = document.modelUsed {
-                    Text(" · ")
-                    Text(ModelManager.catalog.first { $0.variant == model }?.displayName ?? model)
+            HStack(spacing: 16) {
+                HStack(spacing: 6) {
+                    Text(document.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    Text("·")
+                    Text(document.duration.clockString)
                 }
-                if document.isMeetingRecording {
-                    Text(" · Meeting")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(document.modelUsed.map { variant in
+                    "Transcribed with " + (ModelManager.catalog.first { $0.variant == variant }?.displayName ?? variant)
+                } ?? "Recording details")
+                Spacer(minLength: 0)
+                Picker("Document section", selection: $selectedTab) {
+                    ForEach(DocumentTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
                 }
-                Spacer()
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 230)
             }
-            .font(Theme.metaValue)
-            .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 28)
+        .padding(.top, 18)
+        .padding(.bottom, 14)
     }
 
     private var hasSummary: Bool {
@@ -246,114 +277,144 @@ struct TranscriptView: View {
     }
 
     private var transcriptTab: some View {
-        VStack(spacing: 0) {
-            if document.segments.contains(where: { $0.source != .microphone }) || document.speakerAnalysisStatus == .failed {
-                speakerAnalysisBanner
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Find in transcript", text: $transcriptSearch)
-                        .textFieldStyle(.plain)
-                        .frame(maxWidth: 250)
-                    Button {
-                        showFindReplace.toggle()
-                    } label: {
-                        Image(systemName: "arrow.left.arrow.right")
+        GeometryReader { geometry in
+            let showsInlineInspector = geometry.size.width >= 880
+            VStack(spacing: 0) {
+                transcriptControls(inlineInspector: showsInlineInspector)
+                HStack(spacing: 0) {
+                    VStack(spacing: 0) {
+                        if showVideo, !(document.videoTracks ?? []).isEmpty {
+                            RecordingVideoView(player: playback.player)
+                                .frame(height: min(220, geometry.size.height * 0.4))
+                                .background(.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                                .padding(.horizontal, 28)
+                                .padding(.top, 6)
+                                .padding(.bottom, 12)
+                        }
+                        segmentList
                     }
-                    .buttonStyle(.borderless)
-                    .keyboardShortcut("f", modifiers: [.command, .shift])
-                    .help("Find and replace")
-                    Spacer()
-                    Button {
-                        undoManager?.undo()
-                    } label: {
-                        Label("Undo", systemImage: "arrow.uturn.backward")
+                    if showPeople && showsInlineInspector {
+                        Divider()
+                        peopleInspector
+                            .frame(width: 244)
+                            .padding(.horizontal, 18)
                     }
-                    .buttonStyle(.borderless)
-                    .disabled(undoManager?.canUndo != true)
-                    Button {
-                        withAnimation { showPeople.toggle() }
-                    } label: {
-                        Label("People", systemImage: "person.2")
-                    }
-                    .buttonStyle(.borderless)
-                    .tint(showPeople ? Color.accentColor : .secondary)
-                }
-
-                if showFindReplace { findReplaceBar }
-                if let suggestion = correctionSuggestions.first {
-                    correctionSuggestion(suggestion)
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
-            HStack(alignment: .top, spacing: 0) {
-                VStack(spacing: 0) {
-                    if showVideo, !(document.videoTracks ?? []).isEmpty {
-                        RecordingVideoView(player: playback.player)
-                            .frame(height: 210)
-                            .background(.black)
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
-                            .padding(.horizontal, 20)
-                            .padding(.bottom, 12)
-                    }
-                    segmentList
-                }
-                if showPeople {
-                    peopleInspector
-                        .frame(width: 248)
-                        .padding(.trailing, 16)
                 }
             }
         }
     }
 
-    private var segmentList: some View {
-        ScrollViewReader { proxy in
-            List {
-                ForEach(timelineRows) { row in
-                    switch row {
-                    case .segment(let segment):
-                        SegmentRow(
-                            segment: segment,
-                            speakerName: document.speakerName(for: segment),
-                            person: document.speakers?.first { $0.id == segment.speakerID },
-                            availableSpeakers: remoteSpeakers,
-                            showSpeaker: document.hasSpeakerLabels,
-                            canEditSpeaker: !isAnalyzingSpeakers,
-                            isActive: segment.id == activeSegmentID,
-                            highlight: transcriptSearch,
-                            onSeek: { playback.seek(to: segment.start) },
-                            onEdit: { newText in commitSegmentEdit(segment.id, text: newText) },
-                            onSpeakerChange: { speakerID in
-                                applySpeakerEdit("Assign speaker") { $0.assignSpeaker(to: segment.id, speakerID: speakerID) }
-                            },
-                            onRename: { editingSpeaker = document.speakers?.first { $0.id == segment.speakerID && !$0.isMicrophone } },
-                            onMerge: { target in
-                                guard let source = segment.speakerID else { return }
-                                applySpeakerEdit("Merge speakers") { $0.mergeSpeaker(id: source, into: target) }
-                            }
-                        )
-                        .padding(.vertical, 2)
-                        .id(segment.id)
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                    case .note(let note):
-                        MeetingNoteRow(
-                            note: note,
-                            onSeek: { playback.seek(to: note.time) },
-                            onEdit: { newText in commitNoteEdit(note.id, text: newText) },
-                            onDelete: { deleteNote(note.id) }
-                        )
-                        .id(note.id)
-                        .listRowSeparator(.hidden)
-                    }
+    private func transcriptControls(inlineInspector: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 14) {
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Find in transcript", text: $transcriptSearch)
+                        .textFieldStyle(.plain)
+                }
+                .font(.callout)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .frame(maxWidth: 220)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
+                Button {
+                    showFindReplace.toggle()
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .accessibilityLabel("Find and replace")
+                .help("Find and replace")
+                Spacer(minLength: 0)
+                if document.segments.contains(where: { $0.source != .microphone }) || document.speakerAnalysisStatus == .failed {
+                    speakerStatusControl
+                }
+                Button {
+                    undoManager?.undo()
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .buttonStyle(.borderless)
+                .disabled(undoManager?.canUndo != true)
+                .accessibilityLabel("Undo")
+                .help("Undo")
+                Button {
+                    withAnimation { showPeople.toggle() }
+                } label: {
+                    Label("People", systemImage: "person.2")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(showPeople ? Color.accentColor : .secondary)
+                .help("Name or merge speakers")
+                .popover(isPresented: Binding(
+                    get: { showPeople && !inlineInspector },
+                    set: { if !inlineInspector { showPeople = $0 } }
+                ), arrowEdge: .bottom) {
+                    peopleInspector
+                        .padding(.horizontal, 18)
+                        .frame(width: 300, height: 460)
                 }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
+            if showFindReplace { findReplaceBar }
+            if let suggestion = correctionSuggestions.first {
+                correctionSuggestion(suggestion)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 12)
+    }
+
+    private var segmentList: some View {
+        let groupStarts = speakerGroupStarts
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(timelineRows) { row in
+                        switch row {
+                        case .segment(let segment):
+                            SegmentRow(
+                                segment: segment,
+                                speakerName: document.speakerName(for: segment),
+                                person: document.speakers?.first { $0.id == segment.speakerID },
+                                availableSpeakers: remoteSpeakers,
+                                showSpeaker: document.hasSpeakerLabels,
+                                startsSpeakerGroup: groupStarts.contains(segment.id),
+                                canEditSpeaker: !isAnalyzingSpeakers,
+                                isActive: segment.id == activeSegmentID,
+                                highlight: transcriptSearch,
+                                onSeek: { playback.seek(to: segment.start) },
+                                onEdit: { newText in commitSegmentEdit(segment.id, text: newText) },
+                                onSpeakerChange: { speakerID in
+                                    applySpeakerEdit("Assign speaker") { $0.assignSpeaker(to: segment.id, speakerID: speakerID) }
+                                },
+                                onRename: { editingSpeaker = document.speakers?.first { $0.id == segment.speakerID && !$0.isMicrophone } },
+                                onMerge: { target in
+                                    guard let source = segment.speakerID else { return }
+                                    applySpeakerEdit("Merge speakers") { $0.mergeSpeaker(id: source, into: target) }
+                                }
+                            )
+                            .id(segment.id)
+                        case .note(let note):
+                            MeetingNoteRow(
+                                note: note,
+                                onSeek: { playback.seek(to: note.time) },
+                                onEdit: { newText in commitNoteEdit(note.id, text: newText) },
+                                onDelete: { deleteNote(note.id) }
+                            )
+                            .padding(.vertical, 12)
+                            .id(note.id)
+                        }
+                    }
+                }
+                .frame(maxWidth: 720)
+                .padding(.horizontal, 32)
+                .padding(.top, 6)
+                .padding(.bottom, 36)
+                .frame(maxWidth: .infinity)
+            }
             .overlay {
                 if document.segments.isEmpty && (document.notes ?? []).isEmpty {
                     ContentUnavailableView(
@@ -473,42 +534,44 @@ struct TranscriptView: View {
         document.speakerAnalysisStatus == .running || document.status == .transcribing
     }
 
-    private var speakerAnalysisBanner: some View {
-        HStack(alignment: .top, spacing: 10) {
-            if isAnalyzingSpeakers {
-                ProgressView().controlSize(.small)
-            } else {
-                Image(systemName: document.speakerAnalysisStatus == .failed ? "exclamationmark.circle" : "waveform.badge.magnifyingglass")
-                    .foregroundStyle(document.speakerAnalysisStatus == .failed ? Color.orange : .secondary)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(speakerAnalysisTitle)
-                    .font(.callout.weight(.medium))
-                if let error = document.speakerAnalysisError, document.speakerAnalysisStatus == .failed {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                } else if document.speakerEditsApplied == true {
-                    Text("Speaker corrections apply to this recording. Retrying keeps your corrections.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+    private var speakerStatusControl: some View {
+        Button { showSpeakerStatus.toggle() } label: {
+            HStack(spacing: 6) {
+                if isAnalyzingSpeakers {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: document.speakerAnalysisStatus == .failed ? "exclamationmark.circle" : "waveform")
                 }
+                Text(isAnalyzingSpeakers ? "Finding speakers" : document.speakerAnalysisStatus == .failed ? "Speakers need review" : "Speakers")
+                    .lineLimit(1)
             }
-            Spacer(minLength: 4)
-            if !isAnalyzingSpeakers {
-                Button(document.speakerAnalysisStatus == .failed ? "Retry" : "Analyze speakers") {
-                    queue.retrySpeakerAnalysis(document.id)
-                }
-                .buttonStyle(.borderless)
-                .disabled(document.segments.isEmpty)
-                .help("Run local speaker analysis without transcribing the audio again")
-            }
+            .font(.caption)
+            .foregroundStyle(document.speakerAnalysisStatus == .failed ? Color.orange : .secondary)
         }
-        .padding(12)
-        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 14))
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
+        .buttonStyle(.borderless)
+        .help(document.speakerAnalysisError ?? speakerAnalysisTitle)
+        .popover(isPresented: $showSpeakerStatus, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(speakerAnalysisTitle).font(.headline)
+                if let error = document.speakerAnalysisError, document.speakerAnalysisStatus == .failed {
+                    Text(error).textSelection(.enabled)
+                }
+                if document.speakerEditsApplied == true {
+                    Text("Speaker corrections apply to this recording. Retrying keeps your corrections.")
+                        .foregroundStyle(.secondary)
+                }
+                if !isAnalyzingSpeakers {
+                    Button(document.speakerAnalysisStatus == .failed ? "Retry speaker analysis" : "Analyze speakers") {
+                        queue.retrySpeakerAnalysis(document.id)
+                    }
+                    .disabled(document.segments.isEmpty)
+                    .help("Run local speaker analysis without transcribing the audio again")
+                }
+            }
+            .font(.callout)
+            .padding(18)
+            .frame(width: 330, alignment: .leading)
+        }
     }
 
     private var speakerAnalysisTitle: String {
@@ -524,8 +587,18 @@ struct TranscriptView: View {
     private var peopleInspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("People").font(.headline)
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text("People").font(.headline)
+                        Spacer()
+                        Button { withAnimation { showPeople = false } } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Close people")
+                    }
                     Text("Name a speaker or combine duplicate labels.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -562,6 +635,7 @@ struct TranscriptView: View {
                                     Image(systemName: "ellipsis.circle")
                                 }
                                 .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
                                 .frame(width: 22)
                                 .disabled(isAnalyzingSpeakers)
                                 .help("Edit or merge this speaker")
@@ -610,7 +684,7 @@ struct TranscriptView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, 16)
         }
     }
 
@@ -874,6 +948,7 @@ struct SegmentRow: View {
     let person: DocumentSpeaker?
     let availableSpeakers: [DocumentSpeaker]
     let showSpeaker: Bool
+    let startsSpeakerGroup: Bool
     let canEditSpeaker: Bool
     let isActive: Bool
     let highlight: String
@@ -889,18 +964,16 @@ struct SegmentRow: View {
     private var isMicrophone: Bool { segment.source == .microphone || person?.isMicrophone == true }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                if showSpeaker {
+        VStack(alignment: .leading, spacing: 0) {
+            if showSpeaker && startsSpeakerGroup {
+                HStack(spacing: 8) {
                     if isMicrophone {
                         Label(speakerName, systemImage: "mic.fill")
-                            .font(.callout.weight(.semibold))
                             .foregroundStyle(.blue)
                             .help("Your microphone always belongs to you")
                     } else {
                         Button(action: onRename) {
                             Text(speakerName.isEmpty ? "Speaker" : speakerName)
-                                .font(.callout.weight(.semibold))
                                 .foregroundStyle(speakerTint(person?.id, isMicrophone: false))
                         }
                         .buttonStyle(.plain)
@@ -912,35 +985,55 @@ struct SegmentRow: View {
                                 .foregroundStyle(.secondary)
                         }
                         .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
                         .frame(width: 20)
                         .disabled(!canEditSpeaker)
-                        .help("Speaker actions")
+                        .accessibilityLabel("Speaker actions for " + speakerName)
+                        .help("Rename or merge this speaker")
                     }
+                    Spacer()
                 }
-                Spacer()
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.top, 20)
+                .padding(.bottom, 6)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 20) {
+                TextField("", text: $text, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16))
+                    .lineSpacing(5)
+                    .focused($focused)
+                    .onSubmit { onEdit(text) }
+                    .onChange(of: focused) { _, isFocused in
+                        if !isFocused { onEdit(text) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Button(action: onSeek) {
                     Text(segment.start.clockString)
-                        .font(.caption.monospacedDigit())
+                        .font(.system(size: 11).monospacedDigit())
                         .foregroundStyle(isActive ? Color.accentColor : .secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Jump playback here")
-            }
-            TextField("", text: $text, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                .lineSpacing(4)
-                .focused($focused)
-                .onSubmit { onEdit(text) }
-                .onChange(of: focused) { _, isFocused in
-                    if !isFocused { onEdit(text) }
+                .frame(width: 44, alignment: .trailing)
+                .help(isMicrophone ? "Jump playback here" : "Jump playback here. Right-click for speaker actions.")
+                .contextMenu {
+                    if !isMicrophone { speakerMenu }
                 }
+            }
+            .padding(.vertical, 5)
+            .overlay(alignment: .leading) {
+                if isActive {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.accentColor)
+                        .frame(width: 2)
+                        .offset(x: -12)
+                        .allowsHitTesting(false)
+                }
+            }
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(isActive ? Color.accentColor.opacity(0.10) : Theme.cardBackground)
-        )
+        .contextMenu {
+            if !isMicrophone { speakerMenu }
+        }
         .onAppear { text = segment.text }
         .onChange(of: segment.text) { _, newValue in
             if !focused { text = newValue }
@@ -979,9 +1072,27 @@ struct SegmentRow: View {
 
 private func speakerTint(_ id: UUID?, isMicrophone: Bool) -> Color {
     if isMicrophone { return .blue }
-    let palette: [Color] = [.purple, .green, .orange, .pink, .teal, .indigo]
+    let light: [NSColor] = [
+        .init(srgbRed: 0.48, green: 0.30, blue: 0.66, alpha: 1),
+        .init(srgbRed: 0.12, green: 0.43, blue: 0.32, alpha: 1),
+        .init(srgbRed: 0.64, green: 0.32, blue: 0.07, alpha: 1),
+        .init(srgbRed: 0.62, green: 0.26, blue: 0.42, alpha: 1),
+        .init(srgbRed: 0.09, green: 0.43, blue: 0.49, alpha: 1),
+        .init(srgbRed: 0.31, green: 0.35, blue: 0.62, alpha: 1)
+    ]
+    let dark: [NSColor] = [
+        .init(srgbRed: 0.75, green: 0.64, blue: 0.92, alpha: 1),
+        .init(srgbRed: 0.52, green: 0.77, blue: 0.64, alpha: 1),
+        .init(srgbRed: 0.89, green: 0.69, blue: 0.43, alpha: 1),
+        .init(srgbRed: 0.88, green: 0.59, blue: 0.71, alpha: 1),
+        .init(srgbRed: 0.46, green: 0.76, blue: 0.81, alpha: 1),
+        .init(srgbRed: 0.63, green: 0.67, blue: 0.93, alpha: 1)
+    ]
     let value = (id?.uuidString ?? "").unicodeScalars.reduce(UInt64(5_381)) { ($0 &* 33) &+ UInt64($1.value) }
-    return palette[Int(value % UInt64(palette.count))]
+    let index = Int(value % UInt64(light.count))
+    return Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark[index] : light[index]
+    })
 }
 
 private struct RecordingVideoView: NSViewRepresentable {
@@ -1069,7 +1180,7 @@ struct PlayerBar: View {
     private static let rates: [Float] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             Button { playback.skip(by: -15) } label: {
                 Image(systemName: "gobackward.15")
             }
@@ -1077,7 +1188,8 @@ struct PlayerBar: View {
 
             Button { playback.togglePlay() } label: {
                 Image(systemName: playback.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 28))
+                    .font(.system(size: 26))
+                    .foregroundStyle(.primary)
             }
             .help(playback.isPlaying ? "Pause" : "Play")
 
@@ -1086,22 +1198,17 @@ struct PlayerBar: View {
             }
             .help("Forward 15 seconds")
 
-            Text(playback.currentTime.clockString)
-                .font(.callout.monospacedDigit())
+            Text("\(playback.currentTime.clockString) / \(playback.duration.clockString)")
+                .font(.system(size: 12).monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .trailing)
+                .fixedSize()
 
             StaticWaveformView(
                 samples: waveformSamples,
                 progress: playback.duration > 0 ? playback.currentTime / playback.duration : 0,
                 onSeek: { playback.seek(to: $0 * playback.duration) }
             )
-            .frame(height: 44)
-
-            Text(playback.duration.clockString)
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .leading)
+            .frame(height: 28)
 
             Menu {
                 ForEach(Self.rates, id: \.self) { rate in
@@ -1119,11 +1226,12 @@ struct PlayerBar: View {
                     .font(.callout.monospacedDigit())
             }
             .menuStyle(.borderlessButton)
-            .frame(width: 64)
+            .frame(width: 48)
             .help("Playback speed")
         }
         .buttonStyle(.borderless)
-        .padding(.horizontal, 16)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 24)
         .padding(.vertical, 10)
         .background(.bar)
         .task(id: document.id) {

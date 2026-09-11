@@ -42,4 +42,4 @@ EOF
 (cd "$workdir" && ollama create s1-mini -f Modelfile)
 
 echo
-echo "Done. Enable local dictation cleanup in Scribe's Dictation settings to use s1-mini."
+echo "Done. Enable local dictation cleanup in Kleio's Dictation settings to use s1-mini."

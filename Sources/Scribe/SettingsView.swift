@@ -199,7 +199,7 @@ struct ReplacementSettings: View {
     private func exportRules() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "Scribe Replacements.json"
+        panel.nameFieldStringValue = "Kleio Replacements.json"
         guard panel.runModal() == .OK, let url = panel.url,
               let data = try? JSONEncoder().encode(replacements.rules) else { return }
         do {
@@ -369,7 +369,7 @@ struct GeneralSettings: View {
             Section("Recording") {
                 Toggle("End meeting recordings when the call ends", isOn: $manualAutoStopEnabled)
 
-                Text("Applies to recordings you start yourself. Scribe stops after the meeting app closes or both sides stay silent for a few minutes.")
+                Text("Applies to recordings you start yourself. Kleio stops after the meeting app closes or both sides stay silent for a few minutes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -587,7 +587,7 @@ struct AISettings: View {
 
             Text(selectedProvider == .appleIntelligence || selectedProvider == .ollama
                  ? "Local providers never send the transcript off the Mac."
-                 : "Summaries send the transcript to the provider you choose, using your own key. Leave the key empty to keep Scribe fully offline.")
+                 : "Summaries send the transcript to the provider you choose, using your own key. Leave the key empty to keep Kleio fully offline.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

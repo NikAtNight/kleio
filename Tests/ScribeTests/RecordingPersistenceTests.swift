@@ -121,3 +121,31 @@ extension RecordingPersistenceTests {
         XCTAssertTrue(library.delete(final))
     }
 }
+
+extension RecordingPersistenceTests {
+    @MainActor
+    func testRestartShowsRecoveredStateWhenManifestCannotBeUpdated() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let active = ScribeDocument(title: "Interrupted meeting", kind: .recording, status: .recording)
+        var analyzing = ScribeDocument(title: "Interrupted analysis", kind: .recording, status: .ready)
+        analyzing.speakerAnalysisStatus = .running
+        let initial = LibraryStore(baseURL: root)
+        XCTAssertTrue(initial.add(active))
+        XCTAssertTrue(initial.add(analyzing))
+        let folders = [initial.folder(for: active.id), initial.folder(for: analyzing.id)]
+        defer {
+            for folder in folders { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path) }
+            try? FileManager.default.removeItem(at: root)
+        }
+        for folder in folders { try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path) }
+        let recovered = LibraryStore(baseURL: root)
+        XCTAssertEqual(recovered.document(id: active.id)?.status, .recovered)
+        XCTAssertEqual(recovered.document(id: analyzing.id)?.status, .ready)
+        XCTAssertEqual(recovered.document(id: analyzing.id)?.speakerAnalysisStatus, .failed)
+        XCTAssertNotNil(recovered.lastError)
+        for folder in folders { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path) }
+        let document = try XCTUnwrap(recovered.document(id: active.id))
+        XCTAssertTrue(recovered.update(document))
+        XCTAssertEqual(LibraryStore(baseURL: root).document(id: active.id)?.status, .recovered)
+    }
+}

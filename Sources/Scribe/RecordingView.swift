@@ -99,7 +99,7 @@ struct ActiveRecordingView: View {
                     .padding(.horizontal)
             }
 
-            Text("Audio saves continuously to this Mac. Keep Scribe open while media finishes saving.")
+            Text("Audio saves continuously to this Mac. Keep Kleio open while media finishes saving.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, 28)
