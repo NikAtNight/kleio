@@ -514,7 +514,8 @@ final class AutoRecordArbiter: ObservableObject {
                 mode: .meeting,
                 library: library,
                 calendarEvent: event,
-                storeCalendarDetails: calendarSync?.storesAutoRecordEventDetails ?? true
+                storeCalendarDetails: calendarSync?.storesAutoRecordEventDetails ?? true,
+                meetingMuteSyncEnabled: UserDefaults.standard.bool(forKey: "meetingMuteSyncEnabled")
             )
             startInProgress = false
             if !recording.isRecording {

@@ -15,11 +15,12 @@ The focused suites cover speaker correction and undo, transcript word alignment,
 
 ## Remaining release work
 
-The redesign and automated fixes do not establish reliability on everyday calls. This order reflects the September 10 code and evidence review.
+The redesign and automated fixes do not establish reliability on everyday calls. This order reflects the September 10 review and September 11 Teams capture investigation.
 
 | Priority | Work | Completion evidence |
 | --- | --- | --- |
 | 1 | Validate real Zoom, Teams, Meet/browser, and Slack capture. Include first-run permissions, window/display selection, Bluetooth changes, sleep/wake, and a long call. | Both audio sources remain audible and correctly attributed; app capture excludes unrelated apps; optional video and transcript seeking stay aligned. |
+| 1 | Verify native automatic mute syncing for meeting apps before relying on it. The opt-in test mode is off by default. The user declined a manual-mute workaround and browser extensions. | Test Teams, Slack, Zoom, and browser controls against saved microphone audio using the matrix below. Unknown state pauses microphone saving. No adapter is verified yet. |
 | 2 | Measure transcription and speaker accuracy on a small set of labelled natural calls. Review short replies, overlap, false speaker splits, and legacy recordings without word timing. | Repeatable results on the same held-out calls, with model versions and scoring rules recorded. Preview any legacy timing repair before replacing saved text. |
 | 3 | Validate native source-loss feedback and disk pressure on a constrained test volume. Local backup/restore and shared manual/automatic disk preflight are implemented and covered with temporary fixtures. | Exercise an actual writer failure without filling the personal machine's main disk. Restore a representative library on another disk and verify playback. Synthetic lifecycle checks do not establish hardware behavior. |
 | 4 | Finish distribution. Version metadata, strict signing, and relocated executable resource checks are implemented. Developer ID signing, notarization, clean-Mac model execution, and an update channel remain. | Install and run offline on a clean Mac after model setup, then upgrade without losing its library. Resolve Hub's generated GPT-2/T5 resource accessor before relying on those fallback defaults. |
@@ -36,7 +37,7 @@ Use a test call with consenting participants and no private screen content. Mode
 3. Record three remote participants with automatic detection. Include short replies, similar voices, interruptions, and overlapping speech. Check the detected count and listen around every speaker change.
 4. In a browser call, confirm remote audio is captured from the browser. Play a test sound in another tab to confirm browser-wide capture; sound from an unrelated application must be excluded when using an app shortcut.
 5. Enable video and select a window, then repeat with a display. Confirm the selection shown by macOS matches the captured image. Cancel the picker and verify no recording starts.
-6. Pause and resume. Briefly disconnect and reconnect a test microphone. Confirm audio, video, notes, transcript times, and seeking remain aligned. Confirm input loss is visible.
+6. Pause and resume. Briefly disconnect and reconnect a test microphone. Confirm audio, video, notes, transcript times, and seeking remain aligned. Confirm input loss is visible. Test Bluetooth output at both 24 and 48 kHz, and change its route during app-audio capture. A changed app-audio format must stop with the captured files retained. Confirm a device with unverified physical-input mapping is rejected before app audio is saved.
 7. Stop capture. Confirm the recording finishes saving before analysis starts. Quit during a test recording and during finalization; reopen and inspect the saved media.
 8. Rename a remote speaker using a saved person. Merge another label into it, merge all remote labels, and undo. Confirm text, timings, microphone attribution, notes, and saved voice profiles stay intact.
 9. Retry speaker analysis after editing text and speaker labels. Confirm corrections remain. Simulate missing speaker models or an unavailable model and confirm a visible analysis failure with the transcript retained.
@@ -127,3 +128,30 @@ Community-1 produced three groups with automatic counting in 0.908 seconds and w
 For the duplicated real audio, the RTTM supplies 44.92 seconds of speech activity. Of that, 3.78 seconds contains overlapping reference speech and is excluded from identity comparison. No boundary collar is applied. Silence is excluded. A total of 0.183 seconds of reference speech has no detected cluster. On exclusive speech, speaker90 overlaps its dominant S1 group for 19.866 seconds and S2 for 0.412 seconds; speaker91 overlaps its dominant S2 group for 19.549 seconds and S1 for 1.874 seconds. Pairings can overlap when the model emits two groups, so these columns are not a partition or a DER score. Correct group count again coexists with local attribution errors.
 
 `multi-auto.json` and `multi-known-3.json` are the CLI reports. Their generic accuracy metrics are omitted because the combined reference is explicitly marked `clipIdentity`. `multi-summary.json` computes coverage separately for the human speech annotations and the whole synthetic clip, with definitions and limitations included. No source, inference setting, package, preference, capture state, or model asset changed for this check.
+
+
+## Native mute-sync test mode
+
+**Status: live acceptance NOT RUN.** The user will help test later. Enable **Follow meeting mute** in Home's microphone options only for these tests. Grant Kleio Accessibility access manually when ready, and start from the chosen app shortcut. Leave test mode off for ordinary use until its behavior is verified. With syncing off, Kleio records the microphone independently of meeting-app mute.
+
+There is no browser extension. Candidate browser readers use native Accessibility and recognized meeting origins. Native app readers currently require explicit English own-microphone action labels. Missing or unsupported labels produce an unavailable state, not a guessed mute value. All Mac audio + mic, calendar recording, and automatic recording lack a selected app target and cannot start while the test mode is enabled. Voice memos and system-audio-only recordings remain independent.
+
+| App or path | Current evidence | Live acceptance |
+| --- | --- | --- |
+| Teams desktop | Parser fixtures and out-of-call read returning unavailable | NOT RUN |
+| Slack desktop | Parser fixtures and out-of-call read returning unavailable | NOT RUN |
+| Zoom desktop | Parser fixtures only | NOT RUN |
+| Meet in a browser | Origin and action-label fixtures only | NOT RUN |
+| Teams or Slack in a browser | Origin and own-microphone fixtures only | NOT RUN |
+| Hidden/background browser meeting | Unavailable state is implemented; actual AX exposure is unknown | NOT RUN |
+
+For each available app/browser combination:
+
+1. Start muted and speak a distinct test phrase. Unmute and speak another. Mute again. Listen to the saved microphone CAF to confirm only the unmuted phrase is present and remote audio continues.
+2. Repeat with keyboard shortcuts and any temporary-unmute control. Include quick toggles and speech at the boundaries. Polling can miss a brief transition; synthetic tests cannot prove these phrases are excluded.
+3. Minimize the call, switch windows and browser tabs, then return. The status must remain accurate or become unavailable with microphone saving paused. Tab audio mute must never be mistaken for meeting microphone mute.
+4. Open a second test call, disconnect/rejoin audio, and end the call. Ambiguous or missing state must suppress new microphone samples. A new call must require fresh confirmations.
+5. Pause/resume Kleio and stop while muted or unmuted. Verify duration, later speech timing, remote audio, optional video, and the final microphone tail.
+6. During an agreed permission test, revoke Accessibility access. The microphone must become unavailable without stopping remote capture. Restore access and verify fresh confirmations are required.
+
+Record app/browser/macOS versions, the observed own-microphone labels, transition timing, saved-audio checks, and unsupported states before declaring support. Do not store room URLs, chat text, or participant names in diagnostics. Live Bluetooth transitions remain deferred.

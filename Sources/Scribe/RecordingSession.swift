@@ -102,6 +102,8 @@ final class RecordingSession: ObservableObject {
     var isBusy: Bool { isRecording || isStarting || isFinalizing || hasPendingSave }
     var pendingSaveDocumentID: UUID? { recordingLibrary?.pendingRecordingSaveIDs.first }
     @Published private(set) var healthMessage: String?
+    @Published private(set) var meetingMuteState: MeetingMuteState?
+    private var muteObservation: MeetingMuteObservation?
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var micLevel: Float = 0
     @Published private(set) var systemLevel: Float = 0
@@ -143,18 +145,24 @@ final class RecordingSession: ObservableObject {
         application: RecordingApplication? = nil,
         videoMode: VideoCaptureMode? = nil,
         microphoneSpeakerName: String = "Me",
-        expectedRemoteSpeakerCount: Int? = nil
+        expectedRemoteSpeakerCount: Int? = nil,
+        meetingMuteSyncEnabled: Bool = false
     ) async {
         guard !isBusy, !library.hasPendingRecordingSaves, useLibrary(library) else { return }
         isStarting = true
         cancelStart = false
         lastError = nil
         healthMessage = nil
+        meetingMuteState = nil
+        muteObservation = nil
         captureFailure = nil
         failureState = CaptureFailureState()
         defer { isStarting = false }
 
         do {
+            if meetingMuteSyncEnabled, mode == .meeting, application == nil {
+                throw CaptureStartError.message("Choose a meeting app shortcut to follow its microphone mute state.")
+            }
             if let available = dependencies.availableDiskCapacity(library.storageURL),
                available < Self.minimumFreeDiskBytes {
                 throw CaptureStartError.message(Self.insufficientDiskMessage)
@@ -168,7 +176,7 @@ final class RecordingSession: ObservableObject {
             try checkStartCancellation()
             if let videoMode { try await capture.prepareVideo(videoMode) }
             try checkStartCancellation()
-            processIDs = try application.map { try ApplicationAudioResolver.resolve($0) } ?? []
+            processIDs = try application.map { try dependencies.resolveApplication($0) } ?? []
             var doc = ScribeDocument(
                 title: calendarEvent?.title ?? application.map { "Meeting · \($0.name)" } ?? Self.defaultTitle(for: mode),
                 kind: .recording,
@@ -196,6 +204,10 @@ final class RecordingSession: ObservableObject {
             lastSystemCallback = RecordingClock.now
             let failureState = self.failureState
             let documentID = doc.id
+            let muteSyncApplication = meetingMuteSyncEnabled && mode == .meeting ? application : nil
+            if muteSyncApplication != nil {
+                meetingMuteState = .unavailable("Waiting for the meeting microphone control.")
+            }
             let onError: @Sendable (String) -> Void = { [weak self, weak library] message in
                 failureState.record(message)
                 Task { @MainActor in
@@ -211,6 +223,15 @@ final class RecordingSession: ObservableObject {
                 folder: folder,
                 processes: application == nil ? nil : processIDs,
                 clock: clock,
+                muteSyncApplication: muteSyncApplication,
+                onMuteState: { [weak self] observation in
+                    Task { @MainActor in
+                        guard let self, muteSyncApplication != nil, self.activeDocumentID == documentID, !self.isFinalizing,
+                              self.muteObservation.map({ observation.observedAt >= $0.observedAt }) ?? true else { return }
+                        self.muteObservation = observation
+                        self.meetingMuteState = observation.effectiveState(at: RecordingClock.now)
+                    }
+                },
                 onError: onError,
                 onWarning: { [weak self] message in
                     Task { @MainActor in
@@ -267,6 +288,8 @@ final class RecordingSession: ObservableObject {
                     lastError = library.lastError
                 }
             }
+            meetingMuteState = nil
+            muteObservation = nil
             activeDocumentID = nil
             activeCalendarEventTitle = nil
         }
@@ -291,20 +314,25 @@ final class RecordingSession: ObservableObject {
     }
 
     private func tick() {
-        guard isRecording, !isPaused else { return }
+        guard isRecording else { return }
+        let now = RecordingClock.now
+        if let muteObservation {
+            meetingMuteState = muteObservation.effectiveState(at: now)
+            if meetingMuteState != .unmuted { micLevel = 0 }
+        }
+        guard !isPaused else { return }
         elapsed = clock?.time() ?? elapsed
         sampleCount += 1
         let time = Double(sampleCount) * Self.waveformSampleInterval
         if capture?.hasMicrophone == true, micLevelHistory.append(micLevel, at: time) { micHistory = micLevelHistory.samples }
         if capture?.hasSystemAudio == true, systemLevelHistory.append(systemLevel, at: time) { systemHistory = systemLevelHistory.samples }
         lastWaveformAppend = Date()
-        let now = RecordingClock.now
         if now >= nextProcessCheck {
             nextProcessCheck = now + 2
             var warning: String?
             if let application {
                 do {
-                    let ids = try ApplicationAudioResolver.resolve(application)
+                    let ids = try dependencies.resolveApplication(application)
                     if ids != processIDs { try capture?.updateProcesses(ids); processIDs = ids }
                 } catch { warning = error.localizedDescription }
             }
@@ -331,6 +359,7 @@ final class RecordingSession: ObservableObject {
             lastSystemCallback = RecordingClock.now
         } else { clock?.pause() }
         isPaused.toggle()
+        capture?.setPaused(isPaused)
         elapsed = clock?.time() ?? elapsed
         // Source timestamps decide which queued samples belong to the pause.
         micLevel = 0
@@ -361,6 +390,8 @@ final class RecordingSession: ObservableObject {
             defer {
                 capture?.close()
                 self.capture = nil
+                self.meetingMuteState = nil
+                self.muteObservation = nil
                 self.isRecording = false
                 self.isPaused = false
                 self.isFinalizing = false

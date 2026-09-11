@@ -67,7 +67,8 @@ struct MeetingDetailView: View {
                             start: meeting.start,
                             end: meeting.end,
                             joinURL: meeting.joinURL
-                        )
+                        ),
+                        meetingMuteSyncEnabled: UserDefaults.standard.bool(forKey: "meetingMuteSyncEnabled")
                     )
                 }
             } label: {

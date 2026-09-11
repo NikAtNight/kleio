@@ -434,6 +434,7 @@ struct HomeView: View {
     @AppStorage("expectedRemoteSpeakerCount") private var speakerCount = 0
     @AppStorage("microphoneSpeakerName") private var microphoneName = "Me"
     @AppStorage("preferredInputDeviceUID") private var inputUID = ""
+    @AppStorage("meetingMuteSyncEnabled") private var meetingMuteSyncEnabled = false
     @AppStorage("speakerDetectionModel") private var speakerModel = "community1"
     @State private var devices = AudioDevices.inputDevices()
     @State private var showCaptureSettings = false
@@ -586,6 +587,20 @@ struct HomeView: View {
                     Text("Other participants").font(.callout.weight(.medium))
                     RemoteSpeakerCountPicker(selection: $speakerCount).labelsHidden()
                 }
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Follow meeting mute", isOn: $meetingMuteSyncEnabled)
+                    Text("Native test mode. Requires Accessibility access and a meeting app shortcut. When the control cannot be read, microphone saving pauses. Background browser tabs may be unavailable.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Not yet verified in live calls. Leave off until testing.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if meetingMuteSyncEnabled {
+                        Button("Open Accessibility Settings") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }.controlSize(.regular)
+                    }
+                }
                 Text("Your microphone is always you. Choose one other person to keep all remote speech under one name.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -728,7 +743,8 @@ extension RecordingSession {
                     application: shortcut,
                     videoMode: videoMode,
                     microphoneSpeakerName: microphoneName.isEmpty ? "Me" : microphoneName,
-                    expectedRemoteSpeakerCount: count > 0 ? count : nil)
+                    expectedRemoteSpeakerCount: count > 0 ? count : nil,
+                    meetingMuteSyncEnabled: defaults.bool(forKey: "meetingMuteSyncEnabled"))
     }
 }
 
@@ -858,26 +874,51 @@ struct TranscribingView: View {
     @EnvironmentObject private var queue: TranscriptionQueue
     let document: ScribeDocument
 
+    private var waiting: Bool { document.status == .queued }
+    private var needsSave: Bool { queue.pendingSaveIDs.contains(document.id) }
+    private var fraction: Double { min(1, max(0, queue.progress[document.id] ?? 0)) }
+
     var body: some View {
         VStack(spacing: 20) {
-            Spacer()
-            ProgressView(value: queue.progress[document.id] ?? 0)
-                .progressViewStyle(.linear)
-                .frame(maxWidth: 420)
-            Text(document.status == .queued ? "Waiting to transcribe…" : "Transcribing \(document.title)…")
-                .font(.headline)
-            if let preview = queue.livePreview[document.id], !preview.isEmpty {
-                Text(preview)
+            Image(systemName: needsSave ? "externaldrive.badge.exclamationmark" : "waveform")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundStyle(needsSave ? Color.orange : Color.accentColor)
+                .frame(width: 64, height: 64)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
+
+            VStack(spacing: 8) {
+                Text(needsSave ? "Waiting to save" : waiting ? "Waiting to transcribe" : "Creating your transcript")
+                    .font(.title2.weight(.semibold))
+                Text(document.title)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .lineLimit(6)
-                    .frame(maxWidth: 520)
-                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
             }
-            Button("Cancel") { queue.cancel(document.id) }
 
-            Spacer()
+            if !needsSave {
+                ProgressView(value: waiting || fraction == 0 ? nil : fraction)
+                    .progressViewStyle(.linear)
+                    .frame(width: 280)
+            }
+
+            Text(needsSave ? "Retry saving to continue. Your recording is still available."
+                 : waiting ? "This recording will start when the current task finishes."
+                 : "Processing audio on this Mac. You can browse your recordings while it finishes.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if needsSave {
+                Button("Retry Save") { queue.retrySave(document.id) }
+                    .buttonStyle(.borderedProminent)
+            } else {
+                Button("Cancel") { queue.cancel(document.id) }
+                    .buttonStyle(.bordered)
+            }
         }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 360)
+        .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

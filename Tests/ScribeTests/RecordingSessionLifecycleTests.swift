@@ -4,6 +4,88 @@ import XCTest
 
 @MainActor
 final class RecordingSessionLifecycleTests: XCTestCase {
+    func testMuteSyncRequiresAppTargetBeforeOpeningDevicesOrCreatingMedia() async throws {
+        let fixture = try Fixture()
+        let driver = SyntheticCaptureDriver()
+        let session = fixture.session(driver: driver)
+        await session.start(mode: .meeting, library: fixture.library, meetingMuteSyncEnabled: true)
+        XCTAssertFalse(session.isRecording)
+        XCTAssertTrue(session.lastError?.contains("app shortcut") == true)
+        XCTAssertEqual(driver.permissionRequests, 0)
+        XCTAssertTrue(driver.events.isEmpty)
+        XCTAssertTrue(fixture.library.documents.isEmpty)
+    }
+
+    func testUnavailableAppTargetDoesNotStartCaptureOrCreateMedia() async throws {
+        let fixture = try Fixture()
+        let driver = SyntheticCaptureDriver()
+        let session = RecordingSession(dependencies: RecordingSessionDependencies(
+            makeCapture: { driver }, availableDiskCapacity: { _ in nil },
+            audioDuration: { _ in 0 }, enqueue: { _, _ in },
+            resolveApplication: { _ in throw TestFailure("Meeting app has no audio source.") }
+        ))
+        await session.start(mode: .meeting, library: fixture.library,
+                            application: .init(bundleID: "test.missing", name: "Missing app"),
+                            meetingMuteSyncEnabled: true)
+        XCTAssertFalse(session.isRecording)
+        XCTAssertEqual(session.lastError, "Meeting app has no audio source.")
+        XCTAssertFalse(driver.events.contains("start"))
+        XCTAssertTrue(fixture.library.documents.isEmpty)
+    }
+
+    func testMuteSyncWiresOnlyMeetingTargetAndResetsStatusAfterStop() async throws {
+        let fixture = try Fixture()
+        let driver = SyntheticCaptureDriver()
+        let session = fixture.session(driver: driver)
+        let app = RecordingApplication(bundleID: "test.meeting", name: "Test meeting")
+        await session.start(mode: .meeting, library: fixture.library, application: app, meetingMuteSyncEnabled: true)
+        XCTAssertTrue(session.isRecording)
+        XCTAssertEqual(driver.muteSyncApplication, app)
+        guard case .unavailable = session.meetingMuteState else { return XCTFail("Startup must wait for a mute reading.") }
+        driver.reportMuteState(.unavailable("Call controls are hidden."))
+        await Task.yield()
+        XCTAssertEqual(session.meetingMuteState, .unavailable("Call controls are hidden."))
+        XCTAssertTrue(session.isRecording)
+        XCTAssertTrue(driver.hasSystemAudio)
+        XCTAssertNil(session.lastError)
+        let latestMuteTime = RecordingClock.now
+        driver.reportMuteState(.muted, at: latestMuteTime)
+        // The callback crosses to the main actor, like the native reader.
+        await Task.yield()
+        XCTAssertEqual(session.meetingMuteState, .muted)
+        driver.reportMuteState(.unmuted, at: latestMuteTime - 0.1)
+        await Task.yield()
+        XCTAssertEqual(session.meetingMuteState, .muted, "An older UI callback must not replace the newer muted reading.")
+        session.togglePause()
+        session.togglePause()
+        XCTAssertTrue(driver.events.contains("pause"))
+        XCTAssertTrue(driver.events.contains("resume"))
+        session.stop(library: fixture.library, queue: fixture.queue)
+        await session.waitForFinalization()
+        XCTAssertNil(session.meetingMuteState)
+        driver.reportMuteState(.unmuted)
+        await Task.yield()
+        XCTAssertNil(session.meetingMuteState)
+    }
+
+    func testVoiceMemosStayIndependentAndMeetingSyncDefaultsOff() async throws {
+        for mode in [RecordingMode.microphoneOnly, .systemOnly, .meeting] {
+            let fixture = try Fixture()
+            let driver = SyntheticCaptureDriver()
+            let session = fixture.session(driver: driver)
+            if mode != .meeting {
+                await session.start(mode: mode, library: fixture.library, meetingMuteSyncEnabled: true)
+            } else {
+                await session.start(mode: mode, library: fixture.library)
+            }
+            XCTAssertTrue(session.isRecording)
+            XCTAssertNil(driver.muteSyncApplication)
+            XCTAssertNil(session.meetingMuteState)
+            session.stop(library: fixture.library, queue: fixture.queue)
+            await session.waitForFinalization()
+        }
+    }
+
     func testSuccessfulLifecyclePersistsThenStopsAudioBeforeQueuing() async throws {
         let fixture = try Fixture()
         let driver = SyntheticCaptureDriver()
@@ -269,7 +351,8 @@ private final class Fixture {
             makeCapture: { driver },
             availableDiskCapacity: { _ in RecordingSession.minimumFreeDiskBytes },
             audioDuration: { [weak driver] _ in driver?.audioDuration ?? 0 },
-            enqueue: { [weak self] _, id in self?.enqueued.append(id) }
+            enqueue: { [weak self] _, id in self?.enqueued.append(id) },
+            resolveApplication: { _ in [123] }
         ))
     }
 
@@ -296,6 +379,8 @@ private final class SyntheticCaptureDriver: RecordingCaptureDriving {
     var videoResult: RecordingVideoStopResult?
     var events: [String] = []
     var cancelStartCalled = false
+    var muteSyncApplication: RecordingApplication?
+    private var muteStateHandler: (@Sendable (MeetingMuteObservation) -> Void)?
 
     private var errorHandler: (@Sendable (String) -> Void)?
     private var startContinuation: CheckedContinuation<Void, Error>?
@@ -318,6 +403,8 @@ private final class SyntheticCaptureDriver: RecordingCaptureDriving {
         folder: URL,
         processes: [UInt32]?,
         clock: RecordingClock,
+        muteSyncApplication: RecordingApplication?,
+        onMuteState: @escaping @Sendable (MeetingMuteObservation) -> Void,
         onError: @escaping @Sendable (String) -> Void,
         onWarning: @escaping @Sendable (String) -> Void,
         onMicLevel: @escaping @Sendable (Float) -> Void,
@@ -325,6 +412,8 @@ private final class SyntheticCaptureDriver: RecordingCaptureDriving {
         onFirstVideoFrame: @escaping @Sendable (TimeInterval) -> Void
     ) async throws {
         events.append("start")
+        self.muteSyncApplication = muteSyncApplication
+        muteStateHandler = onMuteState
         errorHandler = onError
         hasMicrophone = mode.usesMic
         hasSystemAudio = mode.usesSystem
@@ -339,6 +428,8 @@ private final class SyntheticCaptureDriver: RecordingCaptureDriving {
     }
 
     func updateProcesses(_ processes: [UInt32]) throws { }
+
+    func setPaused(_ paused: Bool) { events.append(paused ? "pause" : "resume") }
 
     func stopAudio() {
         events.append("stop-audio")
@@ -366,6 +457,10 @@ private final class SyntheticCaptureDriver: RecordingCaptureDriving {
 
     func close() {
         events.append("close")
+    }
+
+    func reportMuteState(_ state: MeetingMuteState, at time: TimeInterval = RecordingClock.now) {
+        muteStateHandler?(.init(state: state, contextID: "test", sourceName: "Test meeting", observedAt: time))
     }
 
     func reportCaptureError(_ message: String) {

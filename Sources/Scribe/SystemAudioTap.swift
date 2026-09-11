@@ -9,6 +9,9 @@ final class SystemAudioTap {
     enum TapError: LocalizedError {
         case osStatus(String, OSStatus)
         case badFormat
+        case configurationChanged
+        case ambiguousInput
+        case inconsistentTiming
 
         var errorDescription: String? {
             switch self {
@@ -16,6 +19,12 @@ final class SystemAudioTap {
                 return "System audio tap failed at \(stage) (error \(status)). Check System Settings → Privacy & Security → Screen & System Audio Recording."
             case .badFormat:
                 return "System audio tap returned an unusable audio format."
+            case .ambiguousInput:
+                return "This output device combines microphone and app-audio streams that Kleio cannot safely separate yet. Choose headphones or another output device before recording app audio."
+            case .configurationChanged:
+                return "The audio device changed during recording. Your recorded audio was kept. Start a new recording with the current device."
+            case .inconsistentTiming:
+                return "App audio stopped arriving at the expected rate. Your recorded audio was kept. Reconnect your audio device before starting a new recording."
             }
         }
     }
@@ -26,7 +35,9 @@ final class SystemAudioTap {
     private var audioFile: AVAudioFile?
     private var timelineWriter: TimelineAudioWriter?
     private var tapDescription: CATapDescription?
-    private var format: AVAudioFormat?
+    private var inputFormat: TapInputFormat?
+    private var readiness: AtomicBool?
+    private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
     private let writeQueue = DispatchQueue(label: "app.talix.scribe.systemtap")
     private let paused = AtomicBool()
     /// Diagnostics: raw IO callbacks seen / buffer conversions failed.
@@ -73,28 +84,11 @@ final class SystemAudioTap {
         try check(AudioHardwareCreateProcessTap(description, &newTapID), "create tap")
         tapID = newTapID
 
-        // The tap tells us the format it delivers (typically 48 kHz stereo).
-        var asbd = AudioStreamBasicDescription()
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioTapPropertyFormat,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        try check(AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &asbd), "read tap format")
-        guard let tapFormat = AVAudioFormat(streamDescription: &asbd) else {
-            cleanup()
-            throw TapError.badFormat
-        }
-        format = tapFormat
-        tapFormatDescription = "\(asbd.mSampleRate) Hz, \(asbd.mChannelsPerFrame)ch, fmt \(asbd.mFormatID), flags \(asbd.mFormatFlags)"
-
-        // A private aggregate device hosts the tap so we can run an IO proc
-        // against it without touching the user's device setup. The default
-        // output device must be included as a real subdevice — an aggregate
-        // with only a tap has no clock, so its IO cycle never runs and the
-        // callback never fires (symptom: a 4 KB header-only file).
-        let outputUID = try defaultOutputDeviceUID()
+        // Give the private aggregate a hardware clock. Its default rate can
+        // differ from Bluetooth output, even while the tap advertises 48 kHz.
+        let output = try defaultOutputDevice()
+        guard try inputBufferChannels(of: output.id).allSatisfy({ $0 == 0 }) else { throw TapError.ambiguousInput }
+        let outputUID = output.uid
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Scribe Tap Device",
             kAudioAggregateDeviceUIDKey: "app.talix.scribe.tap.\(UUID().uuidString)",
@@ -116,22 +110,28 @@ final class SystemAudioTap {
         try check(AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &newAggregateID), "create aggregate device")
         aggregateID = newAggregateID
 
-        // The tap delivers interleaved float32; AVAudioFile's default
-        // processing format is de-interleaved, and ExtAudioFileWrite errors
-        // (-50) on the mismatch — declare interleaved explicitly.
-        if let url, let clock {
-            timelineWriter = try TimelineAudioWriter(url: url, format: tapFormat, clock: clock)
-        } else if let url {
-            audioFile = try AVAudioFile(
-                forWriting: url,
-                settings: tapFormat.settings,
-                commonFormat: .pcmFormatFloat32,
-                interleaved: tapFormat.isInterleaved
-            )
+        var rateAddress = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var rate = try nominalRate(of: output.id)
+        let rateSize = UInt32(MemoryLayout<Float64>.size)
+        // Set only the private aggregate, and only to its anchor's current rate.
+        try check(AudioObjectSetPropertyData(aggregateID, &rateAddress, 0, nil, rateSize, &rate), "align aggregate rate")
+        // HAL property changes are asynchronous. Keep startup bounded while
+        // waiting for the aggregate to publish the requested device rate.
+        for _ in 0..<50 {
+            if (try? nominalRate(of: aggregateID)) == rate { break }
+            usleep(10_000)
+        }
+        guard try nominalRate(of: aggregateID) == rate, try nominalRate(of: output.id) == rate else {
+            throw TapError.configurationChanged
         }
 
+        let ready = AtomicBool()
+        readiness = ready
+        let invalidated = AtomicBool()
         let pausedFlag = paused
         var levelCounter = 0
+        var timing = TapTimingValidator()
         try check(AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, writeQueue) { [weak self] _, inInputData, inputTime, _, _ in
             guard let self else { return }
             self.callbackCount.increment()
@@ -140,48 +140,92 @@ final class SystemAudioTap {
                 let sizes = abl.map { "\($0.mDataByteSize)B/\($0.mNumberChannels)ch" }.joined(separator: ", ")
                 self.firstBufferDescription = "buffers: \(abl.count) [\(sizes)]"
             }
-            guard let format = self.format else { return }
-            guard !pausedFlag.value else { return }
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inInputData, deallocator: nil) else {
-                self.conversionFailures.increment()
-                return
-            }
-            // bufferListNoCopy can leave frameLength at 0 — set it from the
-            // delivered byte count or write() silently writes nothing.
-            let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
-            if bytesPerFrame > 0 {
-                buffer.frameLength = inInputData.pointee.mBuffers.mDataByteSize / bytesPerFrame
-            }
-            if self.firstBufferDescription.hasSuffix("]") {
-                self.firstBufferDescription += " frameLength=\(buffer.frameLength) capacity=\(buffer.frameCapacity)"
-            }
-            guard buffer.frameLength > 0 else { return }
-            if self.audioFile != nil || self.timelineWriter != nil {
-                do {
-                    guard self.firstWriteError.isEmpty else { return }
-                    if let writer = self.timelineWriter {
-                        let timestamp = inputTime.pointee
-                        guard timestamp.mFlags.contains(.hostTimeValid) else {
-                            throw TapError.badFormat
-                        }
-                        try writer.write(buffer, hostTime: AVAudioTime.seconds(forHostTime: timestamp.mHostTime))
-                    } else { try self.audioFile?.write(from: buffer) }
-                    self.writesOK.increment()
-                } catch {
-                    if self.firstWriteError.isEmpty {
-                        self.firstWriteError = "\(error)"
-                        onError?("App audio could not be saved. \(error.localizedDescription)")
-                    }
+            guard ready.value, !pausedFlag.value, self.firstWriteError.isEmpty else { return }
+            do {
+                guard !invalidated.value else { throw TapError.configurationChanged }
+                guard let input = self.inputFormat else { throw TapError.badFormat }
+                guard let buffer = try input.copyBuffer(from: inInputData) else { return }
+                let timestamp = inputTime.pointee
+                guard timestamp.mFlags.contains(.hostTimeValid) else { throw TapError.badFormat }
+                let hostTime = AVAudioTime.seconds(forHostTime: timestamp.mHostTime)
+                try timing.validate(frames: buffer.frameLength, rate: input.format.sampleRate,
+                    hostTime: hostTime, sampleTime: timestamp.mFlags.contains(.sampleTimeValid) ? timestamp.mSampleTime : nil)
+                if self.firstBufferDescription.hasSuffix("]") {
+                    self.firstBufferDescription += " frameLength=\(buffer.frameLength) capacity=\(buffer.frameCapacity)"
                 }
-            }
-            // Level metering ~10x/sec is plenty; buffers arrive ~100x/sec.
-            levelCounter += 1
-            if levelCounter % 8 == 0 {
-                onLevel(buffer.rmsLevel)
+                if let writer = self.timelineWriter {
+                    try writer.write(buffer, hostTime: hostTime)
+                    self.writesOK.increment()
+                } else if let file = self.audioFile {
+                    try file.write(from: buffer)
+                    self.writesOK.increment()
+                }
+                levelCounter += 1
+                if levelCounter % 8 == 0 { onLevel(buffer.rmsLevel) }
+            } catch {
+                self.conversionFailures.increment()
+                self.report(error, onError: onError)
             }
         }, "create IO proc")
 
         try check(AudioDeviceStart(aggregateID, ioProcID), "start device")
+        // No samples are saved until the running device's format is validated.
+        var runningInput: (TapInputFormat, [AudioObjectID])?
+        for _ in 0..<50 {
+            if let candidate = try? readInputFormat(outputDevice: output.id), candidate.0.format.sampleRate == rate {
+                runningInput = candidate
+                break
+            }
+            usleep(10_000)
+        }
+        guard let (input, streams) = runningInput else { throw TapError.configurationChanged }
+        let expectedRate = rate
+        let changed: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            // A delayed notification from startup or a process-list refresh
+            // need not mean the running format changed. Compare actual values.
+            do {
+                guard try self.configurationMatches(input: input, streams: streams,
+                    output: output.id, rate: expectedRate) else { throw TapError.configurationChanged }
+            } catch {
+                invalidated.value = true
+                if ready.value { self.report(TapError.configurationChanged, onError: onError) }
+            }
+        }
+        var watched: [(AudioObjectID, AudioObjectPropertySelector, AudioObjectPropertyScope)] = [
+            (AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal),
+            (aggregateID, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput),
+            (aggregateID, kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput),
+            (aggregateID, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal),
+            (aggregateID, kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal),
+            (output.id, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal),
+            (output.id, kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal),
+            (tapID, kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal),
+        ]
+        for stream in streams {
+            watched.append((stream, kAudioStreamPropertyVirtualFormat, kAudioObjectPropertyScopeGlobal))
+            watched.append((stream, kAudioStreamPropertyStartingChannel, kAudioObjectPropertyScopeGlobal))
+        }
+        for (object, selector, scope) in watched {
+            var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+            try check(AudioObjectAddPropertyListenerBlock(object, &address, writeQueue, changed), "observe audio format")
+            listeners.append((object, address, changed))
+        }
+        guard try configurationMatches(input: input, streams: streams, output: output.id, rate: rate) else {
+            throw TapError.configurationChanged
+        }
+        try writeQueue.sync {
+            guard !invalidated.value, firstWriteError.isEmpty else { throw TapError.configurationChanged }
+            inputFormat = input
+            tapFormatDescription = "\(input.format.sampleRate) Hz, \(input.format.channelCount)ch, aggregate input"
+            if let url, let clock {
+                timelineWriter = try TimelineAudioWriter(url: url, format: input.format, clock: clock)
+            } else if let url {
+                audioFile = try AVAudioFile(forWriting: url, settings: input.format.settings,
+                    commonFormat: .pcmFormatFloat32, interleaved: false)
+            }
+            ready.value = true
+        }
     }
 
     var isPaused: Bool { paused.value }
@@ -191,6 +235,12 @@ final class SystemAudioTap {
     }
 
     func stop() {
+        readiness?.value = false
+        for (object, originalAddress, block) in listeners {
+            var address = originalAddress
+            AudioObjectRemovePropertyListenerBlock(object, &address, writeQueue, block)
+        }
+        listeners.removeAll()
         if let ioProcID, aggregateID != kAudioObjectUnknown {
             AudioDeviceStop(aggregateID, ioProcID)
             AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
@@ -218,6 +268,12 @@ final class SystemAudioTap {
         guard status == noErr else { throw TapError.osStatus("update selected app", status) }
     }
 
+    private func report(_ error: Error, onError: (@Sendable (String) -> Void)?) {
+        guard firstWriteError.isEmpty else { return }
+        firstWriteError = error.localizedDescription
+        onError?(error.localizedDescription)
+    }
+
     private func cleanup() {
         if aggregateID != kAudioObjectUnknown {
             AudioHardwareDestroyAggregateDevice(aggregateID)
@@ -236,9 +292,8 @@ final class SystemAudioTap {
         }
     }
 
-    /// UID of the device the user currently hears audio through — the
-    /// aggregate's clock source.
-    private func defaultOutputDeviceUID() throws -> String {
+    /// The device used to clock the private aggregate and select its tap stream.
+    private func defaultOutputDevice() throws -> (id: AudioObjectID, uid: String) {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -254,7 +309,84 @@ final class SystemAudioTap {
         try withUnsafeMutablePointer(to: &uid) { pointer in
             try check(AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, pointer), "read output device UID")
         }
-        return uid as String
+        return (deviceID, uid as String)
+    }
+
+    private func nominalRate(of device: AudioObjectID) throws -> Float64 {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        try check(AudioObjectGetPropertyData(device, &address, 0, nil, &size, &rate), "read device rate")
+        guard rate.isFinite, rate > 0 else { throw TapError.badFormat }
+        return rate
+    }
+
+    private func configurationMatches(input: TapInputFormat, streams: [AudioObjectID], output: AudioObjectID, rate: Double) throws -> Bool {
+        let (current, currentStreams) = try readInputFormat(outputDevice: output)
+        for device in [output, aggregateID] {
+            var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsAlive,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var alive: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            try check(AudioObjectGetPropertyData(device, &address, 0, nil, &size, &alive), "check audio device")
+            guard alive != 0 else { return false }
+        }
+        return try defaultOutputDevice().id == output && nominalRate(of: output) == rate
+            && nominalRate(of: aggregateID) == rate && currentStreams == streams
+            && current.format == input.format && current.bufferChannels == input.bufferChannels
+    }
+
+    private func streamIDs(of device: AudioObjectID, scope: AudioObjectPropertyScope) throws -> [AudioObjectID] {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams,
+            mScope: scope, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        try check(AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size), "read stream count")
+        guard size > 0 else { return [] }
+        var streams = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        try check(AudioObjectGetPropertyData(device, &address, 0, nil, &size, &streams), "read streams")
+        return streams
+    }
+
+    private func streamFormat(_ stream: AudioObjectID) throws -> AVAudioFormat {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioStreamPropertyVirtualFormat,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        try check(AudioObjectGetPropertyData(stream, &address, 0, nil, &size, &asbd), "read stream format")
+        guard let format = AVAudioFormat(streamDescription: &asbd) else { throw TapError.badFormat }
+        return format
+    }
+
+    private func inputBufferChannels(of device: AudioObjectID) throws -> [UInt32] {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        try check(AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size), "read input layout size")
+        guard size >= MemoryLayout<UInt32>.size else { throw TapError.badFormat }
+        let storage = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { storage.deallocate() }
+        try check(AudioObjectGetPropertyData(device, &address, 0, nil, &size, storage), "read input layout")
+        let list = storage.assumingMemoryBound(to: AudioBufferList.self)
+        return UnsafeMutableAudioBufferListPointer(list).map(\.mNumberChannels)
+    }
+
+    private func readInputFormat(outputDevice: AudioObjectID) throws -> (TapInputFormat, [AudioObjectID]) {
+        let channels = try streamIDs(of: aggregateID, scope: kAudioObjectPropertyScopeInput).map { stream in
+            var address = AudioObjectPropertyAddress(mSelector: kAudioStreamPropertyStartingChannel,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var firstChannel: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            try check(AudioObjectGetPropertyData(stream, &address, 0, nil, &size, &firstChannel), "read stream channel")
+            return (stream: stream, first: firstChannel)
+        }.sorted { $0.first < $1.first }
+        let streams = channels.map(\.stream)
+        let formats = try streams.map(streamFormat)
+        try TapInputFormat.validateChannelOrder(starts: channels.map(\.first), counts: formats.map(\.channelCount))
+        guard try inputBufferChannels(of: outputDevice).allSatisfy({ $0 == 0 }) else { throw TapError.ambiguousInput }
+        let input = try TapInputFormat(streamFormats: formats)
+        guard try inputBufferChannels(of: aggregateID) == input.bufferChannels else { throw TapError.badFormat }
+        return (input, streams)
     }
 
     /// Translates a PID to its Core Audio process object (for tap exclusion).

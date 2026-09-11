@@ -86,6 +86,11 @@ struct ActiveRecordingView: View {
             .font(.callout).foregroundStyle(.secondary)
             .padding(.top, 8)
 
+            if let state = recording.meetingMuteState {
+                MeetingMuteStatusView(state: state)
+                    .padding(.top, 12)
+            }
+
             Spacer(minLength: 30)
 
             controlCluster
@@ -100,7 +105,7 @@ struct ActiveRecordingView: View {
                     .padding(.horizontal)
             }
 
-            Text("Audio saves continuously to this Mac. Keep Kleio open while media finishes saving.")
+            Text("Recordings stay on this Mac. Keep Kleio open while media finishes saving.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, 28)
@@ -211,6 +216,28 @@ struct ActiveRecordingView: View {
     }
 }
 
+private struct MeetingMuteStatusView: View {
+    let state: MeetingMuteState
+
+    var body: some View {
+        switch state {
+        case .muted:
+            Label("Microphone muted in meeting", systemImage: "mic.slash")
+                .font(.callout).foregroundStyle(.secondary)
+        case .unmuted:
+            Label("Following meeting microphone", systemImage: "mic")
+                .font(.callout).foregroundStyle(.secondary)
+        case .unavailable(let reason):
+            VStack(spacing: 4) {
+                Label("Microphone saving paused", systemImage: "mic.slash")
+                    .font(.callout).foregroundStyle(.orange)
+                Text(reason).font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }.frame(maxWidth: 440).padding(.horizontal)
+        }
+    }
+}
+
 struct LevelMeter: View {
     let label: String
     let icon: String
@@ -257,6 +284,9 @@ struct RecordingStatusBar: View {
                 Text(recording.hasPendingSave ? "Recording needs to be saved" : recording.isFinalizing ? "Finishing recording…" : "\(recording.isPaused ? "Paused" : "Recording") · \(recording.elapsed.clockString)")
                     .font(.callout.weight(.semibold).monospacedDigit())
             }.buttonStyle(.plain)
+            if let state = recording.meetingMuteState {
+                MeetingMuteStatusView(state: state).lineLimit(1)
+            }
             if let message = recording.healthMessage {
                 Text(message).font(.caption).foregroundStyle(.orange).lineLimit(1)
             }

@@ -31,6 +31,8 @@ final class MicRecorder {
     private var deviceDisconnectObserver: NSObjectProtocol?
     private var audioFile: AVAudioFile?
     private var timelineWriter: TimelineAudioWriter?
+    private var meetingMuteGate: MeetingMicrophoneGate?
+    private var gateTimer: DispatchSourceTimer?
     private var onError: (@Sendable (String) -> Void)?
     private var onWarning: (@Sendable (String) -> Void)?
     private var writeFailed = false
@@ -49,7 +51,7 @@ final class MicRecorder {
         }
     }
 
-    func start(writingTo url: URL, clock: RecordingClock? = nil, onError: (@Sendable (String) -> Void)? = nil, onWarning: (@Sendable (String) -> Void)? = nil, onLevel: @escaping @Sendable (Float) -> Void) throws {
+    func start(writingTo url: URL, clock: RecordingClock? = nil, meetingMuteGate: MeetingMicrophoneGate? = nil, onError: (@Sendable (String) -> Void)? = nil, onWarning: (@Sendable (String) -> Void)? = nil, onLevel: @escaping @Sendable (Float) -> Void) throws {
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             throw MicError.permissionDenied
         }
@@ -60,6 +62,8 @@ final class MicRecorder {
             } else {
                 audioFile = try AVAudioFile(forWriting: url, settings: MicAudioProcessing.targetFormat.settings)
             }
+            self.meetingMuteGate = meetingMuteGate
+            meetingMuteGate?.reset()
             self.onError = onError
             self.onWarning = onWarning
             writeFailed = false
@@ -73,6 +77,13 @@ final class MicRecorder {
 
             do {
                 try startCaptureWithFallback()
+                if meetingMuteGate != nil {
+                    let timer = DispatchSource.makeTimerSource(queue: sampleQueue)
+                    timer.schedule(deadline: .now(), repeating: 0.1)
+                    timer.setEventHandler { [weak self] in self?.drainGate() }
+                    gateTimer = timer
+                    timer.resume()
+                }
             } catch {
                 stateLock.lock()
                 recordingActive = false
@@ -81,6 +92,7 @@ final class MicRecorder {
                 audioFile = nil
                 timelineWriter?.finish()
                 timelineWriter = nil
+                self.meetingMuteGate = nil
                 self.onError = nil
                 self.onLevel = nil
                 fileURL = nil
@@ -93,7 +105,19 @@ final class MicRecorder {
     var isPaused: Bool { paused.value }
 
     func setPaused(_ value: Bool) {
-        paused.value = value
+        controlQueue.sync {
+            guard paused.value != value else { return }
+            // Keep capture blocked until the resume reset has completed.
+            paused.value = true
+            sampleQueue.sync {
+                if meetingMuteGate != nil {
+                    drainGate(finishing: true)
+                    meetingMuteGate?.reset()
+                    onLevel?(0)
+                }
+                paused.value = value
+            }
+        }
     }
 
     func stop() {
@@ -101,8 +125,11 @@ final class MicRecorder {
             stateLock.lock()
             recordingActive = false
             stateLock.unlock()
+            gateTimer?.cancel()
+            gateTimer = nil
             tearDownCapture()
             sampleQueue.sync {}
+            meetingMuteGate = nil
             audioFile = nil
             timelineWriter?.finish()
             timelineWriter = nil
@@ -267,6 +294,10 @@ final class MicRecorder {
         stateLock.lock()
         captureGeneration &+= 1
         stateLock.unlock()
+        sampleQueue.sync {
+            drainGate(finishing: true)
+            meetingMuteGate?.reset()
+        }
         if let runtimeObserver {
             NotificationCenter.default.removeObserver(runtimeObserver)
             self.runtimeObserver = nil
@@ -290,9 +321,25 @@ final class MicRecorder {
         stateLock.unlock()
         guard shouldWrite, buffer.frameLength > 0, !writeFailed else { return }
 
+        if let meetingMuteGate {
+            for output in meetingMuteGate.enqueue(buffer, hostTime: hostTime, at: RecordingClock.now) {
+                persist(output.buffer, hostTime: output.hostTime)
+            }
+        } else {
+            persist(buffer, hostTime: hostTime)
+        }
+    }
+
+    private func drainGate(finishing: Bool = false) {
+        guard let meetingMuteGate else { return }
+        for output in meetingMuteGate.drain(at: RecordingClock.now, finishing: finishing) {
+            persist(output.buffer, hostTime: output.hostTime)
+        }
+    }
+
+    private func persist(_ buffer: AVAudioPCMBuffer, hostTime: TimeInterval) {
+        guard !writeFailed else { return }
         do {
-            // This is the durability boundary: every capture buffer reaches
-            // the CAF file before any derived level update is delivered.
             if let timelineWriter { try timelineWriter.write(buffer, hostTime: hostTime) }
             else { try audioFile?.write(from: buffer) }
         } catch {
@@ -308,7 +355,8 @@ final class MicRecorder {
         let callback = emitLevel ? onLevel : nil
         stateLock.unlock()
         if let callback {
-            callback(MicAudioProcessing.level(of: buffer))
+            callback(meetingMuteGate.map { $0.level(of: buffer, at: RecordingClock.now) }
+                ?? MicAudioProcessing.level(of: buffer))
         }
     }
 }

@@ -204,3 +204,83 @@ Not run: natural-call evaluation, live device or Bluetooth failure, sleep/wake, 
 - PASS: `./scripts/make-app.sh --install`, including release compilation, strict signature verification, and direct resource reads by the relocated executable. `/Applications/Kleio.app` was replaced and is running. The installed executable matches `build/Kleio.app`; its own `--package-self-check` passes. Version is 1.0.0, build 39.1, revision ff3008ec8862, modified checkout. Existing dependency and cached-module warnings remain.
 - PASS: all 18 library and people-store files remained byte-for-byte unchanged after installation, including the five recording manifests and media. Summary and transcription model selections also remained unchanged. The previous app is retained at `build/app-backups/install.lUCzdQ/Kleio.app`.
 - PASS: `git diff --check`, `bash -n scripts/make-app.sh scripts/verify-app.sh`, and `plutil -lint Resources/Info.plist`. No commit, push, dependency upgrade, model execution, model download, or cloud request was part of this reliability follow-up. The complete local source diff is retained at `build/kleio-reliability-review/changes.patch`.
+
+## Teams capture review, September 11
+
+Owner: the integrating agent. Requirement: investigate a natural Teams meeting with seven audible remote speakers, muted microphone capture, the large provisional transcript shown while processing, and inaccurate words. The user chose to wait for verified automatic Teams mute syncing rather than add a manual-mute workaround. No model downloads, uploads, or replacement of the original recording are authorized by this investigation.
+
+Observed evidence, before fixes:
+
+- The captured app-audio file contains a repeating 10 ms signal block followed by 10 ms exact silence. Every sample in the recurring zero phase across the recording is zero. Both inference libraries read that pattern from the original file; neither creates it.
+- A private diagnostic reconstruction removes the confirmed zero phase and reads the remaining samples at half the declared rate. It trims less than 10 ms from the end to match the original duration. On a 30-second excerpt the cached Small model changes from one noise marker to 85 words; cached Turbo changes from empty output to 82 words. Mean word confidence rises to 0.924 and 0.970 respectively. This demonstrates recognition recovery without measuring word accuracy against a human reference.
+- With the same Community-1 configuration, the diagnostic reconstruction increases automatically detected remote groups from one to six and detected speech coverage from about 80 to 478 seconds. A supplied count of seven changes cluster assignments; seven output groups are not proof of seven correct identities. Model thresholds remain unchanged.
+- The headphone output reported 24 kHz while a new private aggregate and its tap advertised 48 kHz. The previous adapter trusted that initial tap format and the first callback buffer. An own-process silence probe on the later 48 kHz route had consistent sample counts and timestamps. A native 24 kHz reproduction is recorded separately below.
+- The decoder accepts word timing beyond the source duration. The transcription screen displays provisional decoder text and derives progress from window-relative timestamp tokens.
+- Core Audio app-output taps and current-process mute properties do not expose a verified Teams microphone mute signal. A read-only accessibility probe outside a call found no usable meeting control. At this checkpoint, automatic mute syncing was unimplemented. The native test mode below supersedes that implementation status; normal recording still uses an independent microphone until the mode is enabled.
+
+Implemented changes:
+
+- `NativeRecordingCaptureDriver.start` opens the microphone before app capture, because opening a Bluetooth microphone can change the output rate. `SystemAudioTap.start` sets its private aggregate to the anchor device's current rate, waits briefly for that value, starts I/O with writes gated, then validates the running input stream format and callback layout. It checks configuration again after installing listeners. Delayed notifications for unchanged values do not stop a valid recording.
+- `TapInputFormat` supplies one validated format to callback decoding and CAF creation. It checks channel counts, data pointers, byte alignment, and equal frame counts before copying tap samples into a planar buffer. The native adapter rejects output devices with physical input channels because their tap/microphone mapping has not been verified. It orders remaining tap streams by their declared starting channel and checks continuity.
+- `TapTimingValidator` rejects five consecutive callback timing mismatches. It preserves isolated gaps; `TimelineAudioWriter` still preserves real missing time. A changed device or invalid layout stops capture through the existing recoverable-failure path and retains captured files. Automatic app-audio reconnection is not implemented.
+- `Transcriber.segments` bounds segments and words to the source duration and removes text for rejected timed words. Progress uses the engine's completed audio windows, subtracting progress retained after an ordinary failed attempt. `TranscribingView` shows the recording title, progress, and one appropriate action without provisional decoder text.
+
+Acceptance evidence for the uncommitted changes after `3a18665`:
+
+- PASS: `swift test --disable-automatic-resolution`, 239 tests with zero failures. The 18 new tap format/timing tests cover 24/48 kHz waveform and duration preservation, interleaved and planar streams, malformed and extra inputs, persistent timing mismatch, isolated gaps, and valid channel numbering that begins after the output channels. Nine source-bound tests cover invalid, crossing, and out-of-file word/segment intervals.
+- PASS: native queued, active, and pending-save rendering with synthetic content. A separate Foundation Progress reproduction covers retries after partial decoding failure. These checks do not establish native capture or word accuracy.
+- PASS, inference execution only: both cached Small English and Turbo process the full diagnostic reconstruction offline. Their mean word confidence is about 0.889 and 0.929, with 79 and 36 word objects below 0.5, compared with 471 in the original saved remote output. No human reference exists, so these are recognition-recovery measurements rather than word accuracy scores. Review candidates retain the saved microphone transcript and do not replace library data.
+- PASS: original recording media and document hashes remain unchanged after diagnostics. No model downloads, uploads, or model preference changes occurred. The corrected waveform and candidate transcripts remain ignored local artifacts.
+
+Native Teams mute controls, device transitions, and full speaker-identity accuracy require further acceptance. Private diagnostics remain under ignored `build/teams-review/`; no meeting transcript or participant data belongs in this record.
+
+
+- PASS: native capture of only a generated 600 Hz signal through a diagnostic build of Kleio using its existing permissions. The 24 kHz headphone run wrote 75 callbacks with no conversion failures and preserved the 600 Hz pitch without repeating zero blocks. The 48 kHz built-in output run wrote 141 callbacks with no failures and also preserved pitch. The microphone device was activated without retaining input only for the headphone test. No meeting audio was captured by either probe.
+- A first 48 kHz attempt failed before creating a CAF because the built-in device numbered the tap's first channel as 7. The correction validates relative channel contiguity instead of requiring channel 1. Both valid offset numbering and invalid gaps/overlaps now have regression coverage. Delayed rate-change notifications and liveness checks received independent review.
+- NOT RUN: a live Bluetooth rate transition during capture. The headphones were no longer the selected device before this check, and no device selection was changed. Automatic Teams mute synchronization and reference-labelled speaker/word accuracy also remain unverified. Automatic detection on the reconstructed recording returns six remote groups for seven audible remote participants.
+- PASS: `./scripts/make-app.sh --install`, strict installed signature verification, and the installed executable's package-resource check. `/Applications/Kleio.app` is running version 1.0.0, build 40.1, source `3a18665ddbc5` with uncommitted changes. The installed executable matches the tested package. The recording's four original files remain byte-for-byte unchanged after installation. The prior app is retained at `build/app-backups/install.WHCine/Kleio.app`.
+- PASS: `git diff --check`. Existing dependency/cache warnings and the previously documented Hub fallback limitation remain. The source diff, test logs, native rendering fixtures, waveform analyses, and install verification are in ignored `build/teams-review/`. No commit or push was part of this fix.
+
+
+## Native meeting mute test mode, September 11
+
+Owner: the integrating agent. The user requested automatic microphone mute syncing across Teams, Slack, Meet, and browsers, chose native only, and deferred live-call testing. Live Bluetooth work is parked. No extension, model download, cloud upload, meeting-control action, permission change, or manual-mute workaround is included.
+
+### Intended result and acceptance boundaries
+
+A selected meeting app's own microphone state controls microphone saving. Muted, unreadable, stale, or ambiguous observations cannot authorize new microphone samples. Remote audio and optional video continue on the existing session clock. Voice memos and system-audio-only recordings remain independent. Automatic syncing stays off by default until the user can test it in real calls.
+
+The implementation is an opt-in test mode, not verified application support. English action labels are candidates. Rapid mute/unmute changes that fall entirely between observations can be missed. The gate cannot make a stronger guarantee than the native signal it receives.
+
+### Implemented path
+
+- Home → microphone options → **Follow meeting mute** stores `meetingMuteSyncEnabled`, initially false. The app shortcut enters `RecordingSession.startUsingPreferences`, then `RecordingSession.start`. Calendar and automatic recording also honor the preference. Because those paths do not select an app, they reject startup while test mode is enabled. All Mac audio + mic behaves the same way. System-audio-only recording stays independent. This happens before permissions, media creation, or device capture.
+- `NativeRecordingCaptureDriver` creates `MeetingMuteMonitor` and `MeetingMicrophoneGate` only for an enabled app-targeted meeting. `MeetingMuteReader` uses native Accessibility on a serial background queue. It never clicks a control or prompts for access. The setup button opens Accessibility settings only when clicked by the user.
+- The reader checks one joined-call context and one explicit own-microphone action button. It rejects participant mute controls, generic Mute/Unmute labels, checkbox semantics, prejoin state, disconnected audio, multiple calls, unsupported origins, and failed reads. Teams, Slack, and Zoom have candidate native rules. Browser rules cover recognized Meet, Teams, and Slack HTTPS origins. Browser audio capture remains browser-wide; hidden meeting tabs can become unreadable.
+- The reader bounds traversal and gives every AX object a per-request timeout. It rereads controls and child structure while caching roles and opaque context identities. Room URL digests exist only in memory. No control text, room URL, or participant data is logged or persisted by this flow.
+- The monitor samples every 0.2 seconds. The gate permits complete audio frames only between adjacent unmuted observations from the same context, at most 0.5 seconds apart. Native observations retain the microphone control read start and end; the uncertain request spans are excluded, and later window traversal cannot extend authorization. It holds at most 0.75 seconds of PCM and zeroes other frames before `TimelineAudioWriter` saves them. Muting does not shorten the audio timeline. An entirely muted microphone produces a valid silent CAF.
+- Capture restarts and pause/resume require new confirmations. Stop invalidates the monitor, flushes only already confirmed microphone spans, and zeroes the unconfirmed tail. Late callbacks cannot update a later recording. Active recording and the status bar show muted, following, or microphone-saving-paused state. Stale observations expire even if the native reader stalls.
+
+### Verification and remaining gaps
+
+Automated checks use synthetic control snapshots, fake readers, generated PCM, temporary CAFs, and the existing recording lifecycle boundary. They do not establish Teams, Slack, Zoom, or browser control behavior in a call.
+
+- `MeetingMuteReaderTests`: provider origins, action direction, own-microphone filtering, ambiguous calls, prejoin/disconnected state, unavailable controls, and opaque identity.
+- `MeetingMicrophoneGateTests`: unauthorized sample exclusion in saved CAFs, preserved duration, stale/future/out-of-order observations, context switches, reset barriers, bounded memory, and silent stop tails.
+- `MeetingMuteMonitorTests`: observations reach the gate, stop discards a read still in flight, and displayed state expires.
+- `RecordingSessionLifecycleTests`: missing target fails before side effects, meeting target and state are wired through the driver, pause/resume is forwarded, stop clears status, voice memos stay independent, and default meetings do not enable syncing.
+
+Focused command: `swift test --disable-automatic-resolution --filter 'MeetingMute|MeetingMicrophoneGate|RecordingSessionLifecycle'`.
+
+Live acceptance remains NOT RUN. The user will provide a test call later. Verify ordinary mute, keyboard shortcuts, temporary unmute, minimize, tab/window changes, multiple calls, call reconnection, Accessibility loss, and speech boundaries against the saved microphone audio. Do not mark any adapter verified until those checks pass. Native browser support cannot promise background-tab continuity. See the [mute-sync acceptance matrix](../meeting-recorder-validation.md#native-mute-sync-test-mode).
+
+
+Final verification for this slice:
+
+- PASS: `swift test --disable-automatic-resolution`, 278 tests with no failures. After the final lifecycle assertions, `swift test --disable-automatic-resolution --filter RecordingSessionLifecycleTests` passed all 14 tests. Logs are `build/mute-sync-review/all-tests.log` and `lifecycle-tests.log`.
+- PASS: `KLEIO_BUILD_VERSION=40.2 ./scripts/make-app.sh --install`, release compilation, signing, relocated resource checks, installation, and launch. The installed executable matches the packaged executable. Automatic syncing was confirmed off. Evidence is `build/mute-sync-review/install.log` and `installed-verification.json`.
+- PASS: independent gate and integration reviews. Review fixes included native request timing, per-element AX timeouts, initial gate reset ordering, continuous interior PCM frames, microphone liveness, stale UI callbacks, and unavailable-state lifecycle coverage.
+- Known build warnings remain in cached dependency debug modules, FluidAudio's unhandled benchmark documentation, and the existing Hub tokenizer fallback. No new dependency or model was downloaded.
+- NOT RUN: live call controls, UI transition timing against recorded speech, and background-tab continuity. No app is marked verified. Bluetooth transitions remain deferred.
+
+Evidence identifies base commit `3a18665ddbc55e0bc8fff9f2886a4b987c899acd` plus the uncommitted patch at `build/mute-sync-review/changes.patch`, which includes the preceding Teams capture fixes. Installed version is 1.0.0, build 40.2, on macOS 26.6.2 and Apple silicon. The previous installed app is preserved in `build/app-backups/install.yBWI5s/Kleio.app`.

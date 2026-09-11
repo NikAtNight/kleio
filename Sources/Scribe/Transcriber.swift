@@ -77,13 +77,15 @@ actor Transcriber {
         var options = Self.decodingOptions(language: language, translate: translate, model: loadedModel)
         options.promptTokens = vocabularyTokens
 
-        let duration = max(audioDuration(of: url), 0.1)
+        let duration = audioDuration(of: url)
         let flag = cancelFlag
+        let engineProgress = whisperKit.progress
+        let initialProgress = engineProgress.fractionCompleted
         let callback: TranscriptionCallback = { progress in
-            // Whisper decodes in 30 s windows; the latest segment end is a
-            // good progress proxy for a single file.
-            let lastEnd = Self.lastTimestamp(in: progress.text)
-            onProgress?(min(lastEnd / duration, 1.0), Transcriber.stripSpecialTokens(from: progress.text))
+            // The engine tracks completed audio windows. Timestamp tokens in
+            // provisional text restart in each window and cannot measure file progress.
+            onProgress?(min(1, max(0, engineProgress.fractionCompleted - initialProgress)),
+                        Transcriber.stripSpecialTokens(from: progress.text))
             // Returning false stops decoding early (cancellation).
             return flag.isSet ? false : nil
         }
@@ -95,7 +97,7 @@ actor Transcriber {
         )
         if cancelFlag.isSet { throw TranscriberError.cancelled }
 
-        return Self.segments(from: results, source: source)
+        return Self.segments(from: results, source: source, duration: duration)
     }
 
     nonisolated static func decodingOptions(language: String?, translate: Bool, model: String?) -> DecodingOptions {
@@ -125,37 +127,55 @@ actor Transcriber {
         vocabularyTokens = tokens.isEmpty ? nil : Array(tokens.prefix(96))
     }
 
-    /// Extracts the last `<|12.34|>` timestamp token from in-flight decoder
-    /// text (window-relative, so only a rough progress signal).
-    private static func lastTimestamp(in text: String) -> Double {
-        guard let match = text.ranges(of: #/<\|(\d+\.\d+)\|>/#).last else { return 0 }
-        let token = text[match].dropFirst(2).dropLast(2)
-        return Double(token) ?? 0
-    }
-
-    nonisolated static func segments(from results: [TranscriptionResult], source: AudioSource) -> [TranscriptSegment] {
+    nonisolated static func segments(
+        from results: [TranscriptionResult], source: AudioSource, duration: TimeInterval? = nil
+    ) -> [TranscriptSegment] {
+        if let duration, !duration.isFinite || duration <= 0 { return [] }
         var out: [TranscriptSegment] = []
         for result in results {
             for seg in result.segments {
-                let text = stripSpecialTokens(from: seg.text)
+                guard let interval = boundedInterval(start: seg.start, end: seg.end, duration: duration) else { continue }
+                var text = stripSpecialTokens(from: seg.text)
+                var rejectedWords = false
+                let words = seg.words?.compactMap { word -> TranscriptWord? in
+                    let clean = stripSpecialTokens(from: word.word)
+                    guard !clean.isEmpty else { return nil }
+                    guard let timing = boundedInterval(start: word.start, end: word.end, duration: duration) else {
+                        rejectedWords = true
+                        return nil
+                    }
+                    // Keep the leading space Whisper uses to join words.
+                    let prefix = String(word.word.prefix(while: { $0.isWhitespace }))
+                    return TranscriptWord(start: timing.start, end: timing.end,
+                                          text: prefix + clean, probability: word.probability)
+                }
+                if rejectedWords {
+                    // Removing timestamps must also remove the rejected words
+                    // from the displayed text, including padded tail speech.
+                    text = (words ?? []).map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                }
                 guard !text.isEmpty else { continue }
                 out.append(TranscriptSegment(
-                    start: TimeInterval(seg.start),
-                    end: TimeInterval(seg.end),
+                    start: interval.start,
+                    end: interval.end,
                     text: text,
                     source: source,
-                    words: seg.words?.compactMap { word in
-                        let clean = stripSpecialTokens(from: word.word)
-                        guard !clean.isEmpty else { return nil }
-                        // Keep the leading space Whisper uses to join words.
-                        let prefix = String(word.word.prefix(while: { $0.isWhitespace }))
-                        return TranscriptWord(start: TimeInterval(word.start), end: TimeInterval(word.end),
-                                              text: prefix + clean, probability: word.probability)
-                    }
+                    words: words
                 ))
             }
         }
         return out
+    }
+
+    private nonisolated static func boundedInterval(
+        start: Float, end: Float, duration: TimeInterval?
+    ) -> (start: TimeInterval, end: TimeInterval)? {
+        let start = TimeInterval(start)
+        let end = TimeInterval(end)
+        guard start.isFinite, end.isFinite, end >= start,
+              end > 0 || start == 0,
+              duration.map({ start < $0 }) ?? true else { return nil }
+        return (max(0, start), min(end, duration ?? end))
     }
 
     /// Whisper emits inline special tokens like <|startoftranscript|> and
