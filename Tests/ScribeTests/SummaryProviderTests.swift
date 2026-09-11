@@ -102,6 +102,73 @@ final class SummaryProviderTests: XCTestCase {
         }
     }
 
+    func testSummaryRejectsDictationModelBeforeSendingARequest() async {
+        UserDefaults.standard.set("ollama", forKey: providerKey)
+        UserDefaults.standard.set("s1-mini:latest", forKey: ollamaModelKey)
+        let document = ScribeDocument(title: "Test", kind: .recording, status: .ready)
+        do {
+            _ = try await SummaryService.summarize(document)
+            XCTFail("A cleanup model must not receive summary requests")
+        } catch SummaryService.SummaryError.unsuitableModel {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertFalse(SummaryService.supportsSummaries(model: "superwhisper/s1-mini:latest"))
+        XCTAssertTrue(SummaryService.supportsSummaries(model: "gemma3:4b"))
+    }
+
+    func testSummaryRequestReservesContextAndRejectsTruncatedOutput() async throws {
+        URLProtocolStub.handler = { request in
+            let stream = request.httpBodyStream
+            stream?.open()
+            defer { stream?.close() }
+            var data = request.httpBody ?? Data()
+            if let stream, data.isEmpty {
+                var bytes = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&bytes, maxLength: bytes.count)
+                    if count <= 0 { break }
+                    data.append(contentsOf: bytes.prefix(count))
+                }
+            }
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertFalse((json["system"] as? String ?? "").isEmpty)
+            let options = try XCTUnwrap(json["options"] as? [String: Any])
+            XCTAssertEqual(options["num_ctx"] as? Int, 8192)
+            XCTAssertEqual(options["num_predict"] as? Int, 768)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"response":"A plausible but unfinished summary","done":true,"done_reason":"length"}"#.utf8))
+        }
+        do {
+            _ = try await makeClient().generate(model: "gemma3:4b", system: "Summarize the source faithfully.",
+                                                prompt: "Source text", maxTokens: 768, contextSize: 8192,
+                                                requireComplete: true)
+            XCTFail("Incomplete output must not become a summary")
+        } catch let error as OllamaClient.ClientError {
+            XCTAssertEqual(error, .incompleteResponse)
+        }
+    }
+
+    func testReadsTheModelsDeclaredContextLimit() async throws {
+        URLProtocolStub.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/show")
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"model_info":{"general.architecture":"gemma3","gemma3.context_length":131072}}"#.utf8))
+        }
+        let contextSize = try await makeClient().modelContextSize("gemma3:4b")
+        XCTAssertEqual(contextSize, 131072)
+        URLProtocolStub.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+             Data(#"{"model_info":{}}"#.utf8))
+        }
+        do {
+            _ = try await makeClient().modelContextSize("unknown")
+            XCTFail("Missing metadata must not silently assume a larger context")
+        } catch let error as OllamaClient.ClientError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
+    }
+
     private func makeClient() -> OllamaClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [URLProtocolStub.self]

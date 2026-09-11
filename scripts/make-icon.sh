@@ -1,5 +1,5 @@
 #!/bin/bash
-# Renders AppIcon.icns from generate-icon.swift.
+# Renders AppIcon.icns from the Kleio master PNG.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -9,15 +9,9 @@ ICONSET="$WORK_DIR/AppIcon.iconset"
 MODULE_CACHE="$WORK_DIR/module-cache"
 mkdir -p "$ICONSET"
 
-for size in 16 32 64 128 256 512 1024; do
-    CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" swift scripts/generate-icon.swift "$ICONSET/icon_${size}x${size}.png" "$size"
+for size in 16 32 128 256 512; do
+    CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" swift scripts/generate-icon.swift Resources/KleioIcon.png "$ICONSET/icon_${size}x${size}.png" "$size"
+    CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" swift scripts/generate-icon.swift Resources/KleioIcon.png "$ICONSET/icon_${size}x${size}@2x.png" "$((size * 2))"
 done
-CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" swift scripts/pack-icon.swift Resources/AppIcon.icns \
-    "$ICONSET/icon_16x16.png" \
-    "$ICONSET/icon_32x32.png" \
-    "$ICONSET/icon_64x64.png" \
-    "$ICONSET/icon_128x128.png" \
-    "$ICONSET/icon_256x256.png" \
-    "$ICONSET/icon_512x512.png" \
-    "$ICONSET/icon_1024x1024.png"
+/usr/bin/iconutil -c icns -o Resources/AppIcon.icns "$ICONSET"
 echo "Wrote Resources/AppIcon.icns"

@@ -1,6 +1,16 @@
 import Foundation
 import SwiftUI
-import AVFoundation
+import Combine
+
+/// Model execution is replaceable so queue ordering is tested with real manifests.
+protocol TranscriptionEngine: Sendable {
+    func load(model: String) async throws
+    func transcribe(file: URL, source: AudioSource, language: String?, translate: Bool,
+                    onProgress: (@Sendable (Double, String) -> Void)?) async throws -> [TranscriptSegment]
+    func cancelCurrent()
+}
+
+extension Transcriber: TranscriptionEngine {}
 
 /// Transcription and speaker analysis share a serial queue so large local
 /// models do not process competing documents at the same time.
@@ -10,20 +20,65 @@ final class TranscriptionQueue: ObservableObject {
     @Published private(set) var livePreview: [UUID: String] = [:]
     @Published private(set) var pendingCount = 0
 
-    let transcriber = Transcriber()
-    let speakerDiarizer = SpeakerDiarizer()
+    @Published private(set) var pendingSaveIDs: Set<UUID> = []
+    @Published private(set) var errors: [UUID: String] = [:]
+    @Published private(set) var currentDocumentID: UUID?
+    var isBusy: Bool { currentDocumentID != nil || !pending.isEmpty || !pendingSaves.isEmpty }
 
-    private struct Job {
-        var documentID: UUID
-        var speakersOnly: Bool
+    struct Options {
+        var model: String
+        var language: String? = nil
+        var translate = false
+        var speakerModel: SpeakerDetectionModel = .community1
+        var analyzeImports = false
     }
+
+    private enum Work {
+        case transcription(allowPartialAudio: Bool)
+        case speakers
+        case save
+    }
+    private struct Job {
+        let id = UUID()
+        let documentID: UUID
+        let work: Work
+    }
+    private enum PendingSave {
+        case beginTranscription(allowPartialAudio: Bool)
+        case transcript(baseline: ScribeDocument, segments: [TranscriptSegment], options: Options, warning: String?)
+        case beginAnalysis(forceImports: Bool, applyCleanup: Bool)
+        case analysis(baseline: ScribeDocument, result: ScribeDocument, applyCleanup: Bool)
+        case failure(message: String, speakersOnly: Bool)
+    }
+
+    private let transcriber: any TranscriptionEngine
+    private let inferSpeakers: SpeakerAnalysis.Inference
+    private let exportAutomatically: (ScribeDocument) -> Void
     private var pending: [Job] = []
-    private var currentDocumentID: UUID?
+    private var pendingSaves: [UUID: PendingSave] = [:]
+    private var currentJobID: UUID?
     private var processingTask: Task<Void, Never>?
+    private var preparingToQuit = false
     private weak var library: LibraryStore?
-    private weak var modelManager: ModelManager?
-    private weak var replacementStore: ReplacementStore?
+    private var optionsProvider: (() -> Options?)?
+    private var cleanup: ([TranscriptSegment]) -> [TranscriptSegment] = { $0 }
     private var attendeeNamesProvider: ((String) -> [String])?
+    private var libraryObservation: AnyCancellable?
+
+    init(transcriber: any TranscriptionEngine = Transcriber(),
+         inferSpeakers: SpeakerAnalysis.Inference? = nil,
+         exportAutomatically: @escaping (ScribeDocument) -> Void = Exporter.exportAutomaticallyIfNeeded) {
+        self.transcriber = transcriber
+        if let inferSpeakers {
+            self.inferSpeakers = inferSpeakers
+        } else {
+            let diarizer = SpeakerDiarizer()
+            self.inferSpeakers = { url, model, count in
+                try await diarizer.intervals(for: url, model: model, expectedSpeakerCount: count)
+            }
+        }
+        self.exportAutomatically = exportAutomatically
+    }
 
     func configure(
         library: LibraryStore,
@@ -31,10 +86,28 @@ final class TranscriptionQueue: ObservableObject {
         replacementStore: ReplacementStore,
         attendeeNamesProvider: ((String) -> [String])? = nil
     ) {
+        configure(library: library, options: { [weak modelManager] in
+            guard let modelManager else { return nil }
+            let language = UserDefaults.standard.string(forKey: "language") ?? ""
+            return Options(model: modelManager.selectedVariant, language: language.isEmpty ? nil : language,
+                           translate: UserDefaults.standard.bool(forKey: "translate"),
+                           speakerModel: SpeakerDetectionModel.selected,
+                           analyzeImports: UserDefaults.standard.bool(forKey: "automaticSpeakerRecognition"))
+        }, cleanup: { [weak replacementStore] segments in
+            replacementStore?.apply(to: segments) ?? segments
+        }, attendeeNamesProvider: attendeeNamesProvider)
+    }
+
+    func configure(library: LibraryStore, options: @escaping () -> Options?,
+                   cleanup: @escaping ([TranscriptSegment]) -> [TranscriptSegment] = { $0 },
+                   attendeeNamesProvider: ((String) -> [String])? = nil) {
         self.library = library
-        self.modelManager = modelManager
-        self.replacementStore = replacementStore
+        optionsProvider = options
+        self.cleanup = cleanup
         self.attendeeNamesProvider = attendeeNamesProvider
+        libraryObservation = library.$documents.sink { [weak self] documents in
+            self?.removeDeletedDocuments(keeping: Set(documents.map(\.id)))
+        }
     }
 
     nonisolated static func mergedKnownSpeakers(
@@ -56,41 +129,22 @@ final class TranscriptionQueue: ObservableObject {
     }
 
     nonisolated static func transcriptionInputs(
-        for document: ScribeDocument, folder: URL
+        for document: ScribeDocument, folder: URL, allowPartialAudio: Bool = false
     ) throws -> (tracks: [AudioTrack], omitted: [String]) {
-        var available: [AudioTrack] = []
-        var omitted: [String] = []
-        for track in document.tracks {
-            do {
-                let file = try AVAudioFile(forReading: folder.appendingPathComponent(track.fileName))
-                guard file.length > 0, file.processingFormat.sampleRate > 0,
-                      let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
-                                                    frameCapacity: AVAudioFrameCount(min(file.length, 1_024))) else {
-                    throw CocoaError(.fileReadCorruptFile)
-                }
-                try file.read(into: buffer)
-                guard buffer.frameLength > 0 else { throw CocoaError(.fileReadCorruptFile) }
-                available.append(track)
-            } catch {
-                omitted.append(sourceDescription(for: track))
-            }
-        }
+        let availability = RecordingAudioAvailability.inspect(document, folder: folder)
+        let available = availability.availableTracks
+        let omitted = availability.unavailable.map { sourceDescription(for: $0.track) }
         guard !available.isEmpty else {
             throw inputError("No usable audio remains in this recording. Its original media references have been kept.", omitted: omitted)
         }
-        if document.recoveredAt == nil, document.status != .recovered, !omitted.isEmpty {
+        if !allowPartialAudio, !omitted.isEmpty {
             throw inputError("Audio is missing, empty, or unreadable. Restore these files before retrying transcription.", omitted: omitted)
         }
         return (available, omitted)
     }
 
     private nonisolated static func sourceDescription(for track: AudioTrack) -> String {
-        let source: String
-        switch track.source {
-        case .microphone: source = "Microphone"
-        case .system: source = "App audio"
-        case .imported: source = track.speakerName ?? "Imported audio"
-        }
+        let source = RecordingAudioAvailability.name(for: track)
         return "\(source) (\(track.fileName))"
     }
 
@@ -101,89 +155,179 @@ final class TranscriptionQueue: ObservableObject {
 
     private nonisolated static func recoveryWarning(omitted: [String]) -> String? {
         guard !omitted.isEmpty else { return nil }
-        return "Partial transcript from recovered audio. These sources were unavailable or could not be transcribed: "
+        return "Partial transcript from available audio. These sources were unavailable or could not be transcribed: "
             + omitted.joined(separator: ", ") + ". Their original media references have been kept."
     }
 
-    func enqueue(_ docID: UUID) {
-        guard currentDocumentID != docID, !pending.contains(where: { $0.documentID == docID }),
-              var doc = library?.document(id: docID), doc.status != .recording else { return }
-        if doc.status == .recovered { doc.recoveredAt = doc.recoveredAt ?? Date() }
+    /// Apply completed decoding against the latest saved version, keeping the
+    /// original transcript and giving edits made during the job precedence.
+    nonisolated static func applyingTranscript(
+        _ decoded: [TranscriptSegment], to current: ScribeDocument, basedOn baseline: ScribeDocument,
+        transcriptionWarning: String? = nil
+    ) -> ScribeDocument {
+        var updated = current
+        updated.rawSegments = current.rawSegments ?? (baseline.segments.isEmpty ? decoded : baseline.segments)
+        if canReplaceTranscript(current, basedOn: baseline) {
+            updated.segments = TranscriptTiming.chronologicalTurns(from: decoded)
+            updated.speakers = nil
+            updated.normalizeSpeakerIdentities()
+            updated.transcriptionWarning = transcriptionWarning
+        }
+        return updated
+    }
+
+    private nonisolated static func canReplaceTranscript(_ current: ScribeDocument, basedOn baseline: ScribeDocument) -> Bool {
+        current.segments == baseline.segments && current.speakers == baseline.speakers
+            && current.microphoneSpeakerName == baseline.microphoneSpeakerName
+            && current.speakerEditsApplied == baseline.speakerEditsApplied
+    }
+
+    func enqueue(_ docID: UUID, allowPartialAudio: Bool = false) {
+        guard !preparingToQuit, canEnqueue(docID), let library,
+              !library.pendingRecordingSaveIDs.contains(docID),
+              var doc = library.document(id: docID), doc.status != .recording else { return }
+        errors[docID] = nil
         doc.status = .queued
         doc.failureReason = nil
-        library?.update(doc)
-        pending.append(Job(documentID: docID, speakersOnly: false))
-        pendingCount = pending.count
-        pump()
+        guard library.update(doc) else {
+            retain(.beginTranscription(allowPartialAudio: allowPartialAudio), for: docID)
+            return
+        }
+        append(docID, work: .transcription(allowPartialAudio: allowPartialAudio))
     }
 
     func retrySpeakerAnalysis(_ docID: UUID) {
-        guard currentDocumentID != docID, !pending.contains(where: { $0.documentID == docID }),
-              let doc = library?.document(id: docID), doc.status == .ready,
+        guard !preparingToQuit, canEnqueue(docID), let doc = library?.document(id: docID), doc.status == .ready,
               !doc.segments.isEmpty else { return }
-        pending.append(Job(documentID: docID, speakersOnly: true))
+        errors[docID] = nil
+        append(docID, work: .speakers)
+    }
+
+    func retrySave(_ docID: UUID) {
+        guard !preparingToQuit, pendingSaves[docID] != nil, currentDocumentID != docID,
+              !pending.contains(where: { $0.documentID == docID }),
+              library?.document(id: docID) != nil else { return }
+        append(docID, work: .save)
+    }
+
+    func cancelCurrent() {
+        guard let currentDocumentID else { return }
+        cancel(currentDocumentID)
+    }
+
+    func cancel(_ docID: UUID) {
+        if currentDocumentID == docID {
+            transcriber.cancelCurrent()
+            processingTask?.cancel()
+        } else if let job = pending.first(where: { $0.documentID == docID }) {
+            pending.removeAll { $0.documentID == docID }
+            pendingCount = pending.count
+            // A completed result waiting for a save is kept until retry or deletion.
+            guard pendingSaves[docID] == nil else { return }
+            let speakersOnly: Bool
+            if case .speakers = job.work { speakersOnly = true } else { speakersOnly = false }
+            saveFailure("Processing was cancelled.", for: docID, speakersOnly: speakersOnly)
+        }
+    }
+
+    /// Stop admitting work, drain cancellation, and save completed results before exit.
+    /// Queued requests become cancelled documents; retries never start a model here.
+    func prepareToQuit() async -> Bool {
+        guard !preparingToQuit else { return false }
+        preparingToQuit = true
+        defer { preparingToQuit = false }
+        let queued = pending
+        pending = []
+        pendingCount = 0
+        for job in queued where pendingSaves[job.documentID] == nil {
+            let speakersOnly: Bool
+            if case .speakers = job.work { speakersOnly = true } else { speakersOnly = false }
+            saveFailure("Processing was cancelled when quitting.", for: job.documentID, speakersOnly: speakersOnly)
+        }
+        transcriber.cancelCurrent()
+        processingTask?.cancel()
+        await processingTask?.value
+        for id in Array(pendingSaves.keys) {
+            switch pendingSaves[id] {
+            case .beginTranscription:
+                saveFailure("Transcription was cancelled when quitting.", for: id, speakersOnly: false)
+            case .beginAnalysis:
+                saveFailure("Speaker analysis was cancelled when quitting.", for: id, speakersOnly: true)
+            default:
+                await retryRetainedSave(id)
+            }
+        }
+        return pendingSaveIDs.isEmpty
+    }
+
+    private func canEnqueue(_ id: UUID) -> Bool {
+        currentDocumentID != id && pendingSaves[id] == nil
+            && !pending.contains { $0.documentID == id }
+    }
+
+    private func append(_ docID: UUID, work: Work) {
+        pending.append(Job(documentID: docID, work: work))
         pendingCount = pending.count
         pump()
     }
 
-    func cancelCurrent() {
-        transcriber.cancelCurrent()
-        processingTask?.cancel()
-    }
-
     private func pump() {
-        guard currentDocumentID == nil, !pending.isEmpty else { return }
+        guard !preparingToQuit, currentDocumentID == nil, !pending.isEmpty else { return }
         let job = pending.removeFirst()
         currentDocumentID = job.documentID
+        currentJobID = job.id
         pendingCount = pending.count
         processingTask = Task {
-            if job.speakersOnly {
+            switch job.work {
+            case .transcription(let partial):
+                await transcribe(job.documentID, allowPartialAudio: partial)
+            case .speakers:
                 await analyzeSpeakers(job.documentID, forceImports: true)
-            } else {
-                await transcribe(job.documentID)
+            case .save:
+                await retryRetainedSave(job.documentID)
             }
             progress[job.documentID] = nil
             livePreview[job.documentID] = nil
             currentDocumentID = nil
+            currentJobID = nil
             processingTask = nil
             pump()
         }
     }
 
-    private func transcribe(_ docID: UUID) async {
-        guard let library, let modelManager,
+    private func transcribe(_ docID: UUID, allowPartialAudio: Bool) async {
+        guard let library, let options = optionsProvider?(),
               var original = library.document(id: docID) else { return }
         original.status = .transcribing
         original.failureReason = nil
-        library.update(original)
+        guard library.update(original) else {
+            retain(.beginTranscription(allowPartialAudio: allowPartialAudio), for: docID)
+            return
+        }
+        clearPendingSave(docID)
         progress[docID] = 0
-
-        let language = UserDefaults.standard.string(forKey: "language") ?? ""
-        let translate = UserDefaults.standard.bool(forKey: "translate")
-        let model = modelManager.selectedVariant
-        let startedAt = Date()
+        let jobID = currentJobID
         do {
             try Task.checkCancellation()
             let folder = library.folder(for: docID)
-            let inputs = try Self.transcriptionInputs(for: original, folder: folder)
+            let inputs = try Self.transcriptionInputs(for: original, folder: folder, allowPartialAudio: allowPartialAudio)
             var omitted = inputs.omitted
-            original.transcriptionWarning = Self.recoveryWarning(omitted: omitted)
-            library.update(original)
-            try await transcriber.load(model: model)
+            try await transcriber.load(model: options.model)
             var allSegments: [TranscriptSegment] = []
             var completedTracks = 0
             let trackCount = Double(inputs.tracks.count)
             for (index, track) in inputs.tracks.enumerated() {
                 try Task.checkCancellation()
+                guard library.document(id: docID) != nil else { return }
                 let base = Double(index) / trackCount
                 var segments: [TranscriptSegment]
                 do {
                     segments = try await transcriber.transcribe(
                         file: folder.appendingPathComponent(track.fileName), source: track.source,
-                        language: language.isEmpty ? nil : language, translate: translate,
+                        language: options.language, translate: options.translate,
                         onProgress: { [weak self] fraction, text in
                             Task { @MainActor in
-                                guard let self, self.currentDocumentID == docID,
+                                guard let self, self.currentJobID == jobID,
                                       self.library?.document(id: docID)?.status == .transcribing else { return }
                                 self.progress[docID] = base + fraction / trackCount
                                 self.livePreview[docID] = text
@@ -194,7 +338,7 @@ final class TranscriptionQueue: ObservableObject {
                 } catch {
                     try Task.checkCancellation()
                     if case Transcriber.TranscriberError.cancelled = error { throw error }
-                    guard original.recoveredAt != nil else { throw error }
+                    guard allowPartialAudio else { throw error }
                     omitted.append(Self.sourceDescription(for: track))
                     continue
                 }
@@ -224,62 +368,136 @@ final class TranscriptionQueue: ObservableObject {
                 throw Self.inputError("None of the recovered audio sources could be transcribed. The media has been kept.", omitted: omitted)
             }
             allSegments.sort { $0.start < $1.start }
-            guard var fresh = library.document(id: docID) else { return }
-            // Keep the earliest raw transcript and any edits made while this
-            // transcription was running.
-            fresh.rawSegments = fresh.rawSegments ?? allSegments
-            if fresh.segments == original.segments {
-                fresh.segments = allSegments
-                fresh.speakers = nil
-                fresh.normalizeSpeakerIdentities()
-            }
-            fresh.status = .ready
-            fresh.modelUsed = model
-            fresh.language = language.isEmpty ? nil : language
-            fresh.failureReason = nil
-            fresh.transcriptionWarning = Self.recoveryWarning(omitted: omitted)
-            library.update(fresh)
-            await analyzeSpeakers(docID, forceImports: false, applyCleanup: true)
-            DiagLog.log("transcription completed for document %@ using model %@: %.1fs, %d segments",
-                        docID.uuidString, model, Date().timeIntervalSince(startedAt), allSegments.count)
+            await saveTranscript(docID, baseline: original, segments: allSegments, options: options,
+                                 warning: Self.recoveryWarning(omitted: omitted))
         } catch {
-            guard var fresh = library.document(id: docID) else { return }
-            fresh.status = .failed
-            fresh.failureReason = error.localizedDescription
-            library.update(fresh)
-            DiagLog.log("transcription failed for document %@: %@", docID.uuidString, error.localizedDescription)
+            saveFailure(Task.isCancelled ? "Transcription was cancelled." : error.localizedDescription,
+                        for: docID, speakersOnly: false)
         }
     }
 
+    private func saveTranscript(_ docID: UUID, baseline: ScribeDocument, segments: [TranscriptSegment],
+                                options: Options, warning: String?) async {
+        guard let library, var fresh = library.document(id: docID) else { return }
+        let replacedTranscript = Self.canReplaceTranscript(fresh, basedOn: baseline)
+        fresh = Self.applyingTranscript(segments, to: fresh, basedOn: baseline, transcriptionWarning: warning)
+        fresh.status = .ready
+        fresh.modelUsed = options.model
+        fresh.language = options.language
+        fresh.failureReason = nil
+        guard library.update(fresh) else {
+            retain(.transcript(baseline: baseline, segments: segments, options: options, warning: warning), for: docID)
+            return
+        }
+        clearPendingSave(docID)
+        if Task.isCancelled || preparingToQuit { return }
+        await analyzeSpeakers(docID, forceImports: false, applyCleanup: replacedTranscript)
+    }
+
     private func analyzeSpeakers(_ docID: UUID, forceImports: Bool, applyCleanup: Bool = false) async {
-        guard let library, var baseline = library.document(id: docID) else { return }
+        guard let library, let options = optionsProvider?(),
+              var baseline = library.document(id: docID) else { return }
+        guard !Task.isCancelled else {
+            saveFailure("Speaker analysis was cancelled.", for: docID, speakersOnly: true)
+            return
+        }
         baseline.speakerAnalysisStatus = .running
         baseline.speakerAnalysisError = nil
-        library.update(baseline)
+        guard library.update(baseline) else {
+            retain(.beginAnalysis(forceImports: forceImports, applyCleanup: applyCleanup), for: docID)
+            return
+        }
+        clearPendingSave(docID)
         livePreview[docID] = "Analyzing remote speakers locally…"
         progress[docID] = nil
-        let model = SpeakerDetectionModel.selected
-        let diarizer = speakerDiarizer
         let analysis = await SpeakerAnalysis.run(
-            baseline, folder: library.folder(for: docID), model: model,
-            analyzeImports: forceImports || UserDefaults.standard.bool(forKey: "automaticSpeakerRecognition"),
-            splitAtSpeakerChanges: baseline.speakerEditsApplied != true
-        ) { url, model, count in
-            try await diarizer.intervals(for: url, model: model, expectedSpeakerCount: count)
+            baseline, folder: library.folder(for: docID), model: options.speakerModel,
+            analyzeImports: forceImports || options.analyzeImports,
+            splitAtSpeakerChanges: baseline.speakerEditsApplied != true, infer: inferSpeakers
+        )
+        guard !Task.isCancelled else {
+            saveFailure("Speaker analysis was cancelled.", for: docID, speakersOnly: true)
+            return
         }
-        guard var fresh = library.document(id: docID) else { return }
+        saveAnalysis(docID, baseline: baseline, analysis: analysis, applyCleanup: applyCleanup)
+    }
+
+    private func saveAnalysis(_ docID: UUID, baseline: ScribeDocument, analysis: ScribeDocument, applyCleanup: Bool) {
+        guard let library, var fresh = library.document(id: docID) else { return }
         let unchanged = fresh.segments == baseline.segments && fresh.speakers == baseline.speakers
+            && fresh.microphoneSpeakerName == baseline.microphoneSpeakerName
         fresh = SpeakerAnalysis.applying(analysis, to: fresh, basedOn: baseline)
-        if applyCleanup, unchanged, let replacementStore {
-            fresh.segments = replacementStore.apply(to: fresh.segments)
-        }
+        if applyCleanup, unchanged { fresh.segments = cleanup(fresh.segments) }
         if let eventID = fresh.calendarEventID {
             fresh.knownSpeakers = Self.mergedKnownSpeakers(
                 fresh.knownSpeakers, adding: attendeeNamesProvider?(eventID) ?? [],
                 limit: max(8, (fresh.knownSpeakers ?? []).count)
             )
         }
-        library.update(fresh)
-        if fresh.status == .ready { Exporter.exportAutomaticallyIfNeeded(fresh) }
+        guard library.update(fresh) else {
+            retain(.analysis(baseline: baseline, result: analysis, applyCleanup: applyCleanup), for: docID)
+            return
+        }
+        clearPendingSave(docID)
+        if fresh.status == .ready { exportAutomatically(fresh) }
+    }
+
+    private func saveFailure(_ message: String, for docID: UUID, speakersOnly: Bool) {
+        guard let library, var fresh = library.document(id: docID) else { return }
+        if speakersOnly {
+            fresh.speakerAnalysisStatus = .failed
+            fresh.speakerAnalysisError = message
+        } else {
+            fresh.status = .failed
+            fresh.failureReason = message
+        }
+        guard library.update(fresh) else {
+            retain(.failure(message: message, speakersOnly: speakersOnly), for: docID)
+            return
+        }
+        clearPendingSave(docID)
+        errors[docID] = message
+    }
+
+    private func retain(_ result: PendingSave, for docID: UUID) {
+        pendingSaves[docID] = result
+        pendingSaveIDs.insert(docID)
+        errors[docID] = (library?.lastError ?? "The recording could not be saved.")
+            + " Retry saving to continue. Any completed work is retained while this save is pending."
+    }
+
+    private func clearPendingSave(_ docID: UUID) {
+        pendingSaves[docID] = nil
+        pendingSaveIDs.remove(docID)
+        errors[docID] = nil
+    }
+
+    private func retryRetainedSave(_ docID: UUID) async {
+        guard !Task.isCancelled, let result = pendingSaves[docID], library?.document(id: docID) != nil else { return }
+        switch result {
+        case .beginTranscription(let partial):
+            await transcribe(docID, allowPartialAudio: partial)
+        case .transcript(let baseline, let segments, let options, let warning):
+            await saveTranscript(docID, baseline: baseline, segments: segments, options: options, warning: warning)
+        case .beginAnalysis(let forceImports, let applyCleanup):
+            await analyzeSpeakers(docID, forceImports: forceImports, applyCleanup: applyCleanup)
+        case .analysis(let baseline, let result, let applyCleanup):
+            saveAnalysis(docID, baseline: baseline, analysis: result, applyCleanup: applyCleanup)
+        case .failure(let message, let speakersOnly):
+            saveFailure(message, for: docID, speakersOnly: speakersOnly)
+        }
+    }
+
+    private func removeDeletedDocuments(keeping ids: Set<UUID>) {
+        pending.removeAll { !ids.contains($0.documentID) }
+        pendingCount = pending.count
+        for id in pendingSaveIDs.subtracting(ids) { clearPendingSave(id) }
+        errors = errors.filter { ids.contains($0.key) }
+        if let currentDocumentID, !ids.contains(currentDocumentID) {
+            transcriber.cancelCurrent()
+            processingTask?.cancel()
+            progress[currentDocumentID] = nil
+            livePreview[currentDocumentID] = nil
+        }
     }
 }

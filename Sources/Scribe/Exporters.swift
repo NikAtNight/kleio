@@ -114,7 +114,8 @@ enum Exporter {
         if let model = doc.modelUsed { out += "- **Model:** \(model)\n" }
         out += "\n"
         if let summary = doc.summary, !summary.isEmpty {
-            out += "## Summary\n\n\(summary)\n\n"
+            let heading = doc.summaryIsStale == true ? "Summary (out of date)" : "Summary"
+            out += "## \(heading)\n\n\(summary)\n\n"
         }
         out += "## Transcript\n\n"
         for row in TranscriptTimelineRow.merged(segments: doc.segments, notes: doc.notes ?? []) {
@@ -146,7 +147,8 @@ enum Exporter {
                 return "<p class=\"note\"><time>\(note.time.clockString)</time> <strong>Note:</strong> \(escape(note.text))</p>"
             }
         }.joined(separator: "\n")
-        let summary = doc.summary.map { "<section><h2>Summary</h2><p>\(escape($0).replacingOccurrences(of: "\n", with: "<br>"))</p></section>" } ?? ""
+        let summaryHeading = doc.summaryIsStale == true ? "Summary (out of date)" : "Summary"
+        let summary = doc.summary.map { "<section><h2>\(summaryHeading)</h2><p>\(escape($0).replacingOccurrences(of: "\n", with: "<br>"))</p></section>" } ?? ""
         return """
         <!doctype html>
         <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">

@@ -147,6 +147,9 @@ struct ScribeDocument: Codable, Identifiable, Hashable {
     var language: String?
     var modelUsed: String?
     var summary: String?
+    /// True when the retained summary predates a change to its source text.
+    /// Optional so documents written by earlier versions still decode.
+    var summaryIsStale: Bool?
     var failureReason: String?
     /// For imports: the original source file path (audio is copied in).
     var originalFilePath: String?

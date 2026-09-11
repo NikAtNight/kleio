@@ -11,6 +11,7 @@ A native macOS meeting recorder with local transcription and speaker review. Req
 - **Speaker correction:** click a remote name to rename it or choose a saved person. Use the ellipsis or context menu to merge labels, or combine all remote labels with **Only one other person**. Undo restores assignments without replacing transcript edits. Corrections never train or rename global voice profiles.
 - **Separate analysis state:** speaker analysis can fail while the transcript remains available. Retry speaker analysis without retranscribing or replacing your corrections. Uncertain audio is labelled for review.
 - **Recoverable media:** audio is written progressively to CAF, with an atomic document manifest saved before capture begins. Video uses a fragmented MOV and is finalized before transcription or normal quit. Capture and save errors are visible. Recovery depends on the media actually saved; it is not a guarantee against every crash or disk failure.
+- **Save retry:** completed transcription, speaker analysis, and summary results remain in memory if saving fails. Retry Save uses the retained result. Pending saves block normal quit, and editing drafts stay open after a failed write.
 - **Native interface:** grouped light/dark surfaces, saved app shortcuts, recent recordings, a people inspector, and recording controls that remain accessible while browsing.
 
 ## Other features
@@ -25,6 +26,14 @@ A native macOS meeting recorder with local transcription and speaker review. Req
 - Watch folders with automatic transcription and export.
 - Optional summaries through Apple Intelligence or Ollama locally, or a cloud provider explicitly configured in Settings → AI.
 
+Summaries require a general-purpose instruction model. The s1-mini model is reserved for dictation cleanup. Long transcripts are processed in bounded parts without discarding the end; repeated, empty, oversized, or incomplete responses are rejected. These checks detect generation failures, not factual accuracy. Review summaries against the transcript before relying on decisions or action items. Generation continues when navigating to another recording. Later transcript, note, title, or speaker-name changes mark the saved summary out of date.
+
+## Back up and restore
+
+Settings → General includes **Back Up Library** and **Restore Backup**. A `.kleiobackup` folder contains recording media, manifests, transcripts, summaries, notes, saved people, voice profiles, and selected local preferences. Downloaded models and credentials are excluded. Finish active recording, processing, and pending saves before starting a backup.
+
+Restore verifies file hashes and recording metadata before changing the library. It runs on the next launch and preserves the previous library in `~/Library/Application Support/Scribe/Backups/`. Keep the selected backup in place until that launch finishes. An interrupted restore is recovered before the app opens its library. Copy the backup to another drive for protection from drive failure.
+
 ## Build and verify
 
 ```sh
@@ -32,7 +41,7 @@ swift test --disable-automatic-resolution
 swift build -c release --disable-automatic-resolution
 ```
 
-To package the app using the existing signing and model pre-warming script:
+To package and verify the app:
 
 ```sh
 ./scripts/make-app.sh
@@ -40,7 +49,9 @@ To package the app using the existing signing and model pre-warming script:
 
 That script creates `build/Kleio.app`. Its `--install` option quits the existing app normally, backs up the old Scribe or Kleio app, and installs `/Applications/Kleio.app`. It stops if the app cannot finish saving. Add `--prewarm` to exercise the selected transcription model after packaging.
 
-This is a development build for this checkout. Bundled SwiftPM resources retain build-path fallbacks; clean-machine packaging and notarization still need validation.
+The package records its version, build number, source revision, and whether the checkout was modified. `KLEIO_VERSION` and `KLEIO_BUILD_VERSION` can override the version numbers. `./scripts/verify-app.sh build/Kleio.app` checks signing, metadata, architecture, resources, and resource reads by the actual executable after relocation. It does not run a model or open the library.
+
+This is a development build. The generated Hub accessor still has a checkout fallback for GPT-2/T5 tokenizer defaults; the relocated resource check does not validate that accessor. Current Whisper models supply their own complete tokenizer configuration. Clean-Mac model execution, Developer ID signing, notarization, and an update channel remain release prerequisites.
 
 Grant Microphone and System Audio Recording access when recording. Video uses the native screen-sharing picker and the corresponding macOS permission flow. Dictation insertion also needs Accessibility access; otherwise it copies the result to the clipboard.
 

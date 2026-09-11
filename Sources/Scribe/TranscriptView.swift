@@ -36,6 +36,7 @@ struct TranscriptView: View {
     @EnvironmentObject private var replacements: ReplacementStore
     @EnvironmentObject private var appState: AppState
     @Environment(\.undoManager) private var undoManager
+    @Environment(\.openSettings) private var openSettings
     @ObservedObject private var savedPeople: SavedPeopleStore
     let document: ScribeDocument
 
@@ -56,9 +57,11 @@ struct TranscriptView: View {
     @State private var editingSpeaker: DocumentSpeaker?
     @State private var showVideo = true
     @State private var newSpeakerName = ""
-    @State private var summarizing = false
-    @State private var summaryError: String?
-    @State private var speakerEditError: String?
+    @EnvironmentObject private var summaries: SummaryJobs
+    private var summarizing: Bool { summaries.runningIDs.contains(document.id) }
+    private var summaryRequestBlocked: Bool { summarizing || summaries.pendingSaveIDs.contains(document.id) }
+    private var summaryError: String? { summaries.errors[document.id] }
+    @State private var documentEditError: String?
     @State private var correctionSuggestions: [(wrong: String, right: String)] = []
     @State private var selectedTab: DocumentTab = .transcript
 
@@ -92,8 +95,7 @@ struct TranscriptView: View {
 
     private var activeSegmentID: UUID? {
         guard playback.documentID == document.id else { return nil }
-        let time = playback.currentTime
-        return document.segments.last { $0.start <= time && time < max($0.end, $0.start + 0.5) }?.id
+        return TranscriptTiming.activeSegmentID(in: document.segments, at: playback.currentTime)
     }
 
     var body: some View {
@@ -152,24 +154,37 @@ struct TranscriptView: View {
                 try saveSpeakerName(person.id, name: name, savedPersonID: savedID, savePerson: savePerson)
             }
         }
+        .onChange(of: summaries.completionCounts[document.id]) { _, _ in
+            selectedTab = .summary
+        }
         .onDisappear {
             if playback.documentID == document.id { playback.unload() }
         }
         .onChange(of: appState.selection) { _, _ in
             correctionSuggestions = []
         }
-        .alert("Summarization Failed", isPresented: summaryErrorBinding) {
+        .alert("Summary not saved", isPresented: summaryErrorBinding) {
+            if summaries.pendingSaveIDs.contains(document.id) {
+                Button("Retry Save") { summaries.retrySave(document.id) }
+                Button("Show Recording Folder") {
+                    NSWorkspace.shared.open(library.folder(for: document.id))
+                }
+            } else {
+                Button("Open AI Settings") { openSettings() }
+            }
             Button("OK", role: .cancel) {}
         } message: {
-            Text(summaryError ?? "")
+            Text(summaries.pendingSaveIDs.contains(document.id)
+                 ? "The generated summary is still available. Check free disk space and access to the recording folder, then retry saving."
+                 : summaryError ?? "")
         }
-        .alert("Speaker change not saved", isPresented: Binding(
-            get: { speakerEditError != nil },
-            set: { if !$0 { speakerEditError = nil } }
+        .alert("Change not saved", isPresented: Binding(
+            get: { documentEditError != nil },
+            set: { if !$0 { documentEditError = nil } }
         )) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(speakerEditError ?? "")
+            Text(documentEditError ?? "")
         }
     }
 
@@ -236,16 +251,40 @@ struct TranscriptView: View {
                             Spacer()
                             Button("Regenerate", action: summarize)
                                 .buttonStyle(.bordered)
-                                .disabled(summarizing || document.segments.isEmpty)
+                                .disabled(summaryRequestBlocked || document.segments.isEmpty)
                         }
-                        // LocalizedStringKey keeps the AI summary's markdown rendering.
-                        Text(LocalizedStringKey(summary))
-                            .font(.callout)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if document.summaryIsStale == true {
+                            Label("Transcript changed since this summary was generated", systemImage: "exclamationmark.circle")
+                                .font(.headline)
+                                .foregroundStyle(.orange)
+                            Text("Regenerate the summary to use the latest transcript, notes, title, and speaker names.")
+                                .foregroundStyle(.secondary)
+                            DisclosureGroup("Show previous summary") {
+                                Text(LocalizedStringKey(summary))
+                                    .textSelection(.enabled)
+                                    .padding(.top, 8)
+                            }
+                        } else if let problem = SummaryService.outputProblem(summary) {
+                            Label("This summary needs to be regenerated", systemImage: "exclamationmark.circle")
+                                .font(.headline)
+                                .foregroundStyle(.orange)
+                            Text(problem)
+                                .foregroundStyle(.secondary)
+                            DisclosureGroup("Show previous output") {
+                                Text(LocalizedStringKey(summary))
+                                    .textSelection(.enabled)
+                                    .padding(.top, 8)
+                            }
+                        } else {
+                            Text(LocalizedStringKey(summary))
+                                .font(.system(size: 16))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                         if summarizing {
                             HStack(spacing: 8) {
                                 ProgressView().controlSize(.small)
+                                Button("Cancel") { summaries.cancel(document.id) }
                                 Text("Summarizing…")
                                     .font(.callout)
                                     .foregroundStyle(.secondary)
@@ -265,8 +304,9 @@ struct TranscriptView: View {
                 } actions: {
                     Button("Generate Summary", action: summarize)
                         .buttonStyle(.borderedProminent)
-                        .disabled(summarizing || document.segments.isEmpty)
+                        .disabled(summaryRequestBlocked || document.segments.isEmpty)
                     if summarizing {
+                        Button("Cancel") { summaries.cancel(document.id) }
                         ProgressView()
                             .controlSize(.small)
                     }
@@ -388,12 +428,12 @@ struct TranscriptView: View {
                                 onSeek: { playback.seek(to: segment.start) },
                                 onEdit: { newText in commitSegmentEdit(segment.id, text: newText) },
                                 onSpeakerChange: { speakerID in
-                                    applySpeakerEdit("Assign speaker") { $0.assignSpeaker(to: segment.id, speakerID: speakerID) }
+                                    _ = applySpeakerEdit("Assign speaker") { $0.assignSpeaker(to: segment.id, speakerID: speakerID) }
                                 },
                                 onRename: { editingSpeaker = document.speakers?.first { $0.id == segment.speakerID && !$0.isMicrophone } },
                                 onMerge: { target in
                                     guard let source = segment.speakerID else { return }
-                                    applySpeakerEdit("Merge speakers") { $0.mergeSpeaker(id: source, into: target) }
+                                    _ = applySpeakerEdit("Merge speakers") { $0.mergeSpeaker(id: source, into: target) }
                                 }
                             )
                             .id(segment.id)
@@ -471,13 +511,13 @@ struct TranscriptView: View {
             }
             .help(SummaryService.isConfigured
                   ? "Generate an AI summary"
-                  : "Add an API key in Settings → AI to enable summaries")
-            .disabled(summarizing || document.segments.isEmpty)
+                  : "Choose a summary provider in Settings → AI")
+            .disabled(summaryRequestBlocked || document.segments.isEmpty)
         }
     }
 
     private var summaryErrorBinding: Binding<Bool> {
-        Binding(get: { summaryError != nil }, set: { if !$0 { summaryError = nil } })
+        Binding(get: { summaryError != nil }, set: { if !$0 { summaries.dismissError(document.id) } })
     }
 
     private var findReplaceBar: some View {
@@ -656,7 +696,7 @@ struct TranscriptView: View {
                     Menu {
                         ForEach(remoteSpeakers) { target in
                             Button("Keep " + target.name) {
-                                applySpeakerEdit("Combine remote speakers") { $0.mergeAllRemoteSpeakers(into: target.id) }
+                                _ = applySpeakerEdit("Combine remote speakers") { $0.mergeAllRemoteSpeakers(into: target.id) }
                             }
                         }
                     } label: {
@@ -696,7 +736,7 @@ struct TranscriptView: View {
             Menu("Merge into") {
                 ForEach(remoteSpeakers.filter { $0.id != person.id }) { target in
                     Button(target.name) {
-                        applySpeakerEdit("Merge speakers") { $0.mergeSpeaker(id: person.id, into: target.id) }
+                        _ = applySpeakerEdit("Merge speakers") { $0.mergeSpeaker(id: person.id, into: target.id) }
                     }
                 }
             }
@@ -710,22 +750,28 @@ struct TranscriptView: View {
     }
 
     private func commitTitle() {
-        guard var doc = library.document(id: document.id), !title.isEmpty, doc.title != title else { return }
-        doc.title = title
-        library.update(doc)
+        do {
+            _ = try DocumentEditing.updateTitle(title, documentID: document.id, library: library)
+        } catch {
+            documentEditError = error.localizedDescription
+        }
     }
 
-    private func commitSegmentEdit(_ segmentID: UUID, text: String) {
-        guard var doc = library.document(id: document.id),
-              let index = doc.segments.firstIndex(where: { $0.id == segmentID }),
-              doc.segments[index].text != text else { return }
-        let oldText = doc.segments[index].text
-        doc.segments[index].text = text
-        library.update(doc)
+    private func commitSegmentEdit(_ segmentID: UUID, text: String) -> Bool {
+        let oldText: String
+        do {
+            guard let savedOldText = try DocumentEditing.updateSegmentText(
+                text, segmentID: segmentID, documentID: document.id, library: library
+            ) else { return true }
+            oldText = savedOldText
+        } catch {
+            documentEditError = error.localizedDescription
+            return false
+        }
         let corrections = DictationDiff.proposedCorrections(original: oldText, edited: text)
         guard (1...3).contains(corrections.count),
               oldText.split(whereSeparator: { $0.isWhitespace }).count
-                == text.split(whereSeparator: { $0.isWhitespace }).count else { return }
+                == text.split(whereSeparator: { $0.isWhitespace }).count else { return true }
         correctionSuggestions = corrections.filter { correction in
             !replacements.rules.contains(where: { rule in
                 rule.original.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -734,20 +780,27 @@ struct TranscriptView: View {
                     .caseInsensitiveCompare(correction.right) == .orderedSame
             })
         }
+        return true
     }
 
-    private func commitNoteEdit(_ noteID: UUID, text: String) {
-        guard var doc = library.document(id: document.id),
-              let index = doc.notes?.firstIndex(where: { $0.id == noteID }),
-              doc.notes?[index].text != text else { return }
-        doc.notes?[index].text = text
-        library.update(doc)
+    private func commitNoteEdit(_ noteID: UUID, text: String) -> Bool {
+        do {
+            _ = try DocumentEditing.updateNoteText(
+                text, noteID: noteID, documentID: document.id, library: library
+            )
+            return true
+        } catch {
+            documentEditError = error.localizedDescription
+            return false
+        }
     }
 
     private func deleteNote(_ noteID: UUID) {
-        guard var doc = library.document(id: document.id) else { return }
-        doc.notes?.removeAll { $0.id == noteID }
-        library.update(doc)
+        do {
+            _ = try DocumentEditing.deleteNote(noteID, documentID: document.id, library: library)
+        } catch {
+            documentEditError = error.localizedDescription
+        }
     }
 
     private func dismissCorrectionSuggestion() {
@@ -756,88 +809,61 @@ struct TranscriptView: View {
     }
 
     private func addSpeaker() {
-        applySpeakerEdit("Add speaker") { $0.addRemoteSpeaker(name: newSpeakerName) != nil }
-        newSpeakerName = ""
+        if applySpeakerEdit("Add speaker", change: { $0.addRemoteSpeaker(name: newSpeakerName) != nil }) {
+            newSpeakerName = ""
+        }
     }
 
     private func saveSpeakerName(_ id: UUID, name: String, savedPersonID: UUID?, savePerson: Bool) throws {
         guard let current = library.document(id: document.id),
               current.speakers?.contains(where: { $0.id == id && !$0.isMicrophone }) == true,
-              current.speakerAnalysisStatus != .running else { throw SpeakerEditFailure.unavailable }
+              current.speakerAnalysisStatus != .running else { throw DocumentEditing.Failure.speakerUnavailable }
         let personID = try savePerson ? savedPeople.add(name: name).id : savedPersonID
-        try commitSpeakerEdit("Rename speaker") { $0.renameSpeaker(id: id, to: name, savedPersonID: personID) }
+        _ = try DocumentEditing.applySpeakerEdit(
+            documentID: document.id,
+            library: library,
+            undoManager: undoManager,
+            actionName: "Rename speaker",
+            onUndoFailure: { documentEditError = $0 },
+            change: { $0.renameSpeaker(id: id, to: name, savedPersonID: personID) }
+        )
     }
 
-    private func applySpeakerEdit(_ actionName: String, change: (inout ScribeDocument) -> Bool) {
+    private func applySpeakerEdit(_ actionName: String, change: (inout ScribeDocument) -> Bool) -> Bool {
         do {
-            try commitSpeakerEdit(actionName, change: change)
+            _ = try DocumentEditing.applySpeakerEdit(
+                documentID: document.id,
+                library: library,
+                undoManager: undoManager,
+                actionName: actionName,
+                onUndoFailure: { documentEditError = $0 },
+                change: change
+            )
+            return true
         } catch {
-            speakerEditError = error.localizedDescription
-        }
-    }
-
-    private func commitSpeakerEdit(_ actionName: String, change: (inout ScribeDocument) -> Bool) throws {
-        guard var current = library.document(id: document.id),
-              current.speakerAnalysisStatus != .running else { throw SpeakerEditFailure.unavailable }
-        current.normalizeSpeakerIdentities()
-        let before = current
-        let snapshot = SpeakerEditingSnapshot(document: current)
-        guard change(&current), current != before else { return }
-        guard library.update(current) else {
-            throw SpeakerEditFailure.save(library.lastError ?? "The recording could not be saved.")
-        }
-        if let undoManager {
-            Self.registerSpeakerUndo(snapshot, library: library, undoManager: undoManager, actionName: actionName)
-        }
-    }
-
-    @MainActor
-    private static func registerSpeakerUndo(
-        _ snapshot: SpeakerEditingSnapshot,
-        library: LibraryStore,
-        undoManager: UndoManager,
-        actionName: String
-    ) {
-        undoManager.registerUndo(withTarget: library) { [weak undoManager] store in
-            guard let undoManager, var current = store.document(id: snapshot.documentID) else { return }
-            let redo = SpeakerEditingSnapshot(document: current)
-            guard current.restoreSpeakerEdits(snapshot) else { return }
-            guard store.update(current) else { return }
-            registerSpeakerUndo(redo, library: store, undoManager: undoManager, actionName: actionName)
-        }
-        undoManager.setActionName(actionName)
-    }
-
-    private enum SpeakerEditFailure: LocalizedError {
-        case unavailable
-        case save(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .unavailable: return "This speaker is no longer available, or speaker analysis is still running."
-            case .save(let message): return message
-            }
+            documentEditError = error.localizedDescription
+            return false
         }
     }
 
     private func replaceAll() {
-        guard !transcriptSearch.isEmpty, var doc = library.document(id: document.id) else { return }
+        guard !transcriptSearch.isEmpty else { return }
         let options: String.CompareOptions = matchCase ? [] : [.caseInsensitive]
-        var changedSegments = 0
-        for index in doc.segments.indices {
-            let oldText = doc.segments[index].text
-            let newText = oldText.replacingOccurrences(
-                of: transcriptSearch,
+        do {
+            let changedSegments = try DocumentEditing.replaceAll(
+                transcriptSearch,
                 with: replacementText,
-                options: options
+                options: options,
+                documentID: document.id,
+                library: library
             )
-            if newText != oldText {
-                doc.segments[index].text = newText
-                changedSegments += 1
-            }
+            replaceResult = changedSegments == 0
+                ? "No segments changed"
+                : changedSegments == 1 ? "1 segment changed" : "\(changedSegments) segments changed"
+        } catch {
+            replaceResult = nil
+            documentEditError = error.localizedDescription
         }
-        library.update(doc)
-        replaceResult = changedSegments == 1 ? "1 segment changed" : "\(changedSegments) segments changed"
     }
 
     private func copyTranscript() {
@@ -846,24 +872,9 @@ struct TranscriptView: View {
     }
 
     private func summarize() {
-        guard SummaryService.isConfigured else {
-            summaryError = SummaryService.SummaryError.noKey.localizedDescription
-            return
-        }
-        summarizing = true
-        Task {
-            do {
-                let summary = try await SummaryService.summarize(document)
-                if var doc = library.document(id: document.id) {
-                    doc.summary = summary
-                    library.update(doc)
-                }
-            } catch {
-                summaryError = error.localizedDescription
-            }
-            summarizing = false
-        }
+        summaries.start(document.id)
     }
+
 }
 
 private struct SpeakerNameSheet: View {
@@ -953,7 +964,7 @@ struct SegmentRow: View {
     let isActive: Bool
     let highlight: String
     let onSeek: () -> Void
-    let onEdit: (String) -> Void
+    let onEdit: (String) -> Bool
     let onSpeakerChange: (UUID) -> Void
     let onRename: () -> Void
     let onMerge: (UUID) -> Void
@@ -1003,9 +1014,9 @@ struct SegmentRow: View {
                     .font(.system(size: 16))
                     .lineSpacing(5)
                     .focused($focused)
-                    .onSubmit { onEdit(text) }
+                    .onSubmit { _ = onEdit(text) }
                     .onChange(of: focused) { _, isFocused in
-                        if !isFocused { onEdit(text) }
+                        if !isFocused { _ = onEdit(text) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button(action: onSeek) {
@@ -1113,7 +1124,7 @@ private struct RecordingVideoView: NSViewRepresentable {
 struct MeetingNoteRow: View {
     let note: MeetingNote
     let onSeek: () -> Void
-    let onEdit: (String) -> Void
+    let onEdit: (String) -> Bool
     let onDelete: () -> Void
 
     @State private var text = ""
@@ -1165,8 +1176,7 @@ struct MeetingNoteRow: View {
     }
 
     private func commitEdit() {
-        onEdit(text)
-        isEditing = false
+        if onEdit(text) { isEditing = false }
     }
 }
 

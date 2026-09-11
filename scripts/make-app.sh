@@ -1,7 +1,8 @@
 #!/bin/bash
 # Package Kleio with the existing signing identity and preserve replaced apps.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+cd "$REPO_ROOT"
 
 INSTALL=false
 PREWARM=false
@@ -13,34 +14,75 @@ for option in "$@"; do
     esac
 done
 
+DEFAULT_MARKETING_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+MARKETING_VERSION="${KLEIO_VERSION:-$DEFAULT_MARKETING_VERSION}"
+if [[ ! "$MARKETING_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "KLEIO_VERSION must contain two or three numeric components." >&2
+    exit 1
+fi
+
+SOURCE_REVISION="$(git rev-parse --short=12 HEAD 2>/dev/null || true)"
+SOURCE_REVISION="${SOURCE_REVISION:-unknown}"
+SOURCE_TREE_STATE="clean"
+BUILD_SUFFIX=""
+if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+    SOURCE_TREE_STATE="modified"
+    BUILD_SUFFIX=".1"
+fi
+DEFAULT_BUILD_VERSION="$(git rev-list --count HEAD 2>/dev/null || true)"
+DEFAULT_BUILD_VERSION="${DEFAULT_BUILD_VERSION:-1}${BUILD_SUFFIX}"
+BUILD_VERSION="${KLEIO_BUILD_VERSION:-$DEFAULT_BUILD_VERSION}"
+if [[ ! "$BUILD_VERSION" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+    echo "KLEIO_BUILD_VERSION must contain one to three numeric components." >&2
+    exit 1
+fi
+
 swift build -c release --disable-automatic-resolution --product Kleio
+BUILD_BIN_DIR="$(swift build -c release --disable-automatic-resolution --show-bin-path)"
 mkdir -p build/app-backups
 PACKAGE_STAGE="$(mktemp -d build/.kleio-package.XXXXXX)"
 STAGED_APP="$PACKAGE_STAGE/Kleio.app"
 APP="build/Kleio.app"
+cleanup_package_stage() {
+    if [ -n "${PACKAGE_STAGE:-}" ] && [ -d "$PACKAGE_STAGE" ]; then
+        /bin/rm -rf -- "$PACKAGE_STAGE"
+    fi
+}
+trap cleanup_package_stage EXIT
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
-cp .build/release/Kleio "$STAGED_APP/Contents/MacOS/Kleio"
+cp "$BUILD_BIN_DIR/Kleio" "$STAGED_APP/Contents/MacOS/Kleio"
 cp Resources/Info.plist "$STAGED_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$STAGED_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_VERSION" "$STAGED_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :KleioSourceRevision $SOURCE_REVISION" "$STAGED_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :KleioSourceTreeState $SOURCE_TREE_STATE" "$STAGED_APP/Contents/Info.plist"
 
-if [ ! -f Resources/AppIcon.icns ]; then
+if [ ! -f Resources/AppIcon.icns ] || \
+   [ Resources/KleioIcon.png -nt Resources/AppIcon.icns ] || \
+   [ scripts/generate-icon.swift -nt Resources/AppIcon.icns ] || \
+   [ scripts/make-icon.sh -nt Resources/AppIcon.icns ]; then
     ./scripts/make-icon.sh
 fi
 cp Resources/AppIcon.icns "$STAGED_APP/Contents/Resources/AppIcon.icns"
-for resource in .build/release/*.bundle; do
+for resource in "$BUILD_BIN_DIR"/*.bundle; do
     [ -d "$resource" ] || continue
     ditto "$resource" "$STAGED_APP/Contents/Resources/$(basename "$resource")"
 done
 
 # Keep the identifier stable so existing permissions and preferences survive.
 SIGN_ID="Talix Dev Signing"
-if security find-identity -v -p codesigning | /usr/bin/grep -q "$SIGN_ID"; then
+AVAILABLE_IDENTITIES="$(security find-identity -v -p codesigning)"
+EXPECTED_SIGNER=""
+if /usr/bin/grep -Fq "\"$SIGN_ID\"" <<< "$AVAILABLE_IDENTITIES"; then
     codesign --force --sign "$SIGN_ID" --identifier app.talix.scribe "$STAGED_APP"
+    EXPECTED_SIGNER="$SIGN_ID"
 else
     echo "Signing identity unavailable; creating a development build."
     codesign --force --sign - --identifier app.talix.scribe \
         -r='designated => identifier "app.talix.scribe"' "$STAGED_APP"
 fi
 codesign --verify --deep --strict "$STAGED_APP"
+KLEIO_EXPECTED_SIGNING_IDENTITY="$EXPECTED_SIGNER" ./scripts/verify-app.sh "$STAGED_APP"
 
 if $PREWARM; then
     WARM_AIFF="$(mktemp -t kleio-warm).aiff"
@@ -59,7 +101,8 @@ if [ -e "$APP" ]; then
 fi
 mv "$STAGED_APP" "$APP"
 rmdir "$PACKAGE_STAGE"
-echo "Built $APP"
+trap - EXIT
+echo "Built $APP ($MARKETING_VERSION, build $BUILD_VERSION, $SOURCE_REVISION $SOURCE_TREE_STATE)"
 
 if $INSTALL; then
     for name in Scribe Kleio; do

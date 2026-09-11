@@ -508,13 +508,6 @@ final class AutoRecordArbiter: ObservableObject {
             phase = core.phase
             return
         }
-        guard hasEnoughDiskSpace else {
-            lastProblem = "Not enough free disk space to start auto-recording."
-            postProblem(lastProblem!, eventID: event.eventID)
-            core.recordingStartFailed()
-            phase = core.phase
-            return
-        }
         startInProgress = true
         Task {
             await recording.start(
@@ -527,19 +520,17 @@ final class AutoRecordArbiter: ObservableObject {
             if !recording.isRecording {
                 if let error = recording.lastError {
                     lastProblem = error
-                    notifyPermissionFailureOnce(error)
+                    if error == RecordingSession.insufficientDiskMessage {
+                        postProblem(error, eventID: event.eventID)
+                    } else {
+                        notifyPermissionFailureOnce(error)
+                    }
                 }
                 core.recordingStartFailed()
                 phase = core.phase
             }
             tick()
         }
-    }
-
-    private var hasEnoughDiskSpace: Bool {
-        guard let values = try? LibraryStore.baseURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
-              let bytes = values.volumeAvailableCapacityForImportantUsage else { return true }
-        return bytes >= 1_000_000_000
     }
 
     private var isBundledApp: Bool { Bundle.main.bundleURL.pathExtension == "app" }

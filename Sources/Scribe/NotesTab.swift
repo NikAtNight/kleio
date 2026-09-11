@@ -7,6 +7,7 @@ struct NotesTab: View {
     let document: ScribeDocument
 
     @State private var newNoteText = ""
+    @State private var editError: String?
 
     private var currentTime: TimeInterval {
         playback.documentID == document.id ? playback.currentTime : 0
@@ -48,37 +49,56 @@ struct NotesTab: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .alert("Note not saved", isPresented: Binding(
+            get: { editError != nil },
+            set: { if !$0 { editError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(editError ?? "")
+        }
     }
 
     private func addNote() {
         let text = newNoteText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, var updatedDocument = library.document(id: document.id) else { return }
-        var updatedNotes = updatedDocument.notes ?? []
-        updatedNotes.append(MeetingNote(time: currentTime, text: text))
-        updatedDocument.notes = updatedNotes
-        library.update(updatedDocument)
-        newNoteText = ""
+        guard !text.isEmpty else { return }
+        do {
+            try DocumentEditing.appendNote(
+                MeetingNote(time: currentTime, text: text),
+                documentID: document.id,
+                library: library
+            )
+            newNoteText = ""
+        } catch {
+            editError = error.localizedDescription
+        }
     }
 
-    private func updateNote(_ noteID: UUID, text: String) {
-        guard var updatedDocument = library.document(id: document.id),
-              let index = updatedDocument.notes?.firstIndex(where: { $0.id == noteID }),
-              updatedDocument.notes?[index].text != text else { return }
-        updatedDocument.notes?[index].text = text
-        library.update(updatedDocument)
+    private func updateNote(_ noteID: UUID, text: String) -> Bool {
+        do {
+            _ = try DocumentEditing.updateNoteText(
+                text, noteID: noteID, documentID: document.id, library: library
+            )
+            return true
+        } catch {
+            editError = error.localizedDescription
+            return false
+        }
     }
 
     private func deleteNote(_ noteID: UUID) {
-        guard var updatedDocument = library.document(id: document.id) else { return }
-        updatedDocument.notes?.removeAll { $0.id == noteID }
-        library.update(updatedDocument)
+        do {
+            _ = try DocumentEditing.deleteNote(noteID, documentID: document.id, library: library)
+        } catch {
+            editError = error.localizedDescription
+        }
     }
 }
 
 private struct NoteTabRow: View {
     let note: MeetingNote
     let onSeek: () -> Void
-    let onEdit: (String) -> Void
+    let onEdit: (String) -> Bool
     let onDelete: () -> Void
 
     @State private var text = ""
@@ -134,7 +154,6 @@ private struct NoteTabRow: View {
     }
 
     private func commitEdit() {
-        onEdit(text)
-        isEditing = false
+        if onEdit(text) { isEditing = false }
     }
 }

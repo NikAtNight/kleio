@@ -8,6 +8,11 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var documents: [ScribeDocument] = []
     @Published var lastError: String?
     @Published private(set) var pendingRecordingSaveIDs: Set<UUID> = []
+    private var pendingRecordingSaves: [UUID: PendingRecordingSave] = [:] {
+        didSet { pendingRecordingSaveIDs = Set(pendingRecordingSaves.keys) }
+    }
+
+    var hasPendingRecordingSaves: Bool { !pendingRecordingSaveIDs.isEmpty }
 
     nonisolated static let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Scribe/library", isDirectory: true)
@@ -93,23 +98,30 @@ final class LibraryStore: ObservableObject {
     /// Publish only after the atomic save succeeds. Callers can retain a pending edit on failure.
     @discardableResult
     func update(_ doc: ScribeDocument) -> Bool {
+        var document = doc
+        if let previous = self.document(id: document.id),
+           let summary = previous.summary, !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           document.summary == previous.summary,
+           SummaryService.sourceText(document) != SummaryService.sourceText(previous) {
+            document.summaryIsStale = true
+        }
         do {
-            let folder = folder(for: doc.id)
+            let folder = folder(for: document.id)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
-            try encoder.encode(doc).write(to: folder.appendingPathComponent("document.json"), options: .atomic)
-            if let index = documents.firstIndex(where: { $0.id == doc.id }) {
-                documents[index] = doc
+            try encoder.encode(document).write(to: folder.appendingPathComponent("document.json"), options: .atomic)
+            if let index = documents.firstIndex(where: { $0.id == document.id }) {
+                documents[index] = document
             } else {
-                documents.append(doc)
+                documents.append(document)
             }
             documents.sort { $0.createdAt > $1.createdAt }
             lastError = nil
             return true
         } catch {
-            lastError = "Could not save \(doc.title). \(error.localizedDescription)"
+            lastError = "Could not save \(document.title). \(error.localizedDescription)"
             return false
         }
     }
@@ -118,8 +130,16 @@ final class LibraryStore: ObservableObject {
     /// Keep the old crash marker on disk, expose the preserved media, and block deletion until retry.
     @discardableResult
     func finalizeRecording(_ doc: ScribeDocument) -> Bool {
+        finalizeRecording(doc, retryDisposition: .keep)
+    }
+
+    @discardableResult
+    func finalizeRecording(
+        _ doc: ScribeDocument,
+        retryDisposition: PendingRecordingSave.Disposition
+    ) -> Bool {
         if update(doc) {
-            pendingRecordingSaveIDs.remove(doc.id)
+            pendingRecordingSaves[doc.id] = nil
             return true
         }
         guard let index = documents.firstIndex(where: { $0.id == doc.id }) else { return false }
@@ -128,8 +148,27 @@ final class LibraryStore: ObservableObject {
         recovered.recoveredAt = recovered.recoveredAt ?? Date()
         recovered.failureReason = "The recording stopped, but its final details have not been saved. " + (lastError ?? "Retry saving.")
         documents[index] = recovered
-        pendingRecordingSaveIDs.insert(doc.id)
+        pendingRecordingSaves[doc.id] = PendingRecordingSave(document: doc, disposition: retryDisposition)
         return false
+    }
+
+    func hasPendingRecordingSave(_ id: UUID) -> Bool {
+        pendingRecordingSaves[id] != nil
+    }
+
+    func retryPendingRecordingSave(_ id: UUID) -> PendingRecordingSave.Disposition? {
+        guard let pending = pendingRecordingSaves[id] else { return nil }
+        // Capture owns media facts and terminal status. Keep edits that can be
+        // made while the manifest save is pending, including title and notes.
+        var document = self.document(id: id) ?? pending.document
+        document.status = pending.document.status
+        document.failureReason = pending.document.failureReason
+        document.recoveredAt = pending.document.recoveredAt
+        document.duration = pending.document.duration
+        document.tracks = pending.document.tracks
+        document.videoTracks = pending.document.videoTracks
+        guard finalizeRecording(document, retryDisposition: pending.disposition) else { return nil }
+        return pending.disposition
     }
 
     func document(id: UUID) -> ScribeDocument? {
@@ -138,7 +177,7 @@ final class LibraryStore: ObservableObject {
 
     @discardableResult
     func delete(_ doc: ScribeDocument) -> Bool {
-        guard !pendingRecordingSaveIDs.contains(doc.id) else {
+        guard !hasPendingRecordingSave(doc.id) else {
             lastError = "Retry saving this stopped recording before deleting it."
             return false
         }
@@ -159,6 +198,17 @@ final class LibraryStore: ObservableObject {
             return false
         }
     }
+}
+
+struct PendingRecordingSave {
+    enum Disposition {
+        case keep
+        case enqueue
+        case discard
+    }
+
+    var document: ScribeDocument
+    var disposition: Disposition
 }
 
 func audioDuration(of url: URL) -> TimeInterval {

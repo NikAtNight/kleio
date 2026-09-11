@@ -11,6 +11,7 @@ struct ActiveRecordingView: View {
     @State private var pulse = false
     @State private var confirmDiscard = false
     @State private var noteText = ""
+    @State private var noteSaveError: String?
 
     private var activeDocument: ScribeDocument? {
         recording.activeDocumentID.flatMap { library.document(id: $0) }
@@ -113,6 +114,14 @@ struct ActiveRecordingView: View {
         } message: {
             Text("The audio recorded so far will be deleted permanently.")
         }
+        .alert("Note not saved", isPresented: Binding(
+            get: { noteSaveError != nil },
+            set: { if !$0 { noteSaveError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(noteSaveError ?? "")
+        }
     }
 
     private var controlButtons: some View {
@@ -188,12 +197,17 @@ struct ActiveRecordingView: View {
     private func addNote() {
         let text = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty,
-              var document = activeDocument else { return }
-        var notes = document.notes ?? []
-        notes.append(MeetingNote(time: recording.elapsed, text: text))
-        document.notes = notes
-        library.update(document)
-        noteText = ""
+              let documentID = recording.activeDocumentID else { return }
+        do {
+            try DocumentEditing.appendNote(
+                MeetingNote(time: recording.elapsed, text: text),
+                documentID: documentID,
+                library: library
+            )
+            noteText = ""
+        } catch {
+            noteSaveError = error.localizedDescription
+        }
     }
 }
 

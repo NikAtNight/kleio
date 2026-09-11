@@ -8,6 +8,7 @@ struct OllamaClient {
         case unavailable
         case httpStatus(Int, String)
         case invalidResponse
+        case incompleteResponse
 
         var errorDescription: String? {
             switch self {
@@ -19,6 +20,8 @@ struct OllamaClient {
                     : "Ollama returned HTTP \(status): \(detail)"
             case .invalidResponse:
                 return "Ollama returned an unexpected response."
+            case .incompleteResponse:
+                return "The model stopped before finishing the summary. Try again or choose another summary model in Settings."
             }
         }
     }
@@ -34,10 +37,12 @@ struct OllamaClient {
         struct Options: Encodable, Equatable {
             let temperature: Double
             let numPredict: Int
+            var numContext: Int? = nil
 
             enum CodingKeys: String, CodingKey {
                 case temperature
                 case numPredict = "num_predict"
+                case numContext = "num_ctx"
             }
         }
     }
@@ -45,10 +50,12 @@ struct OllamaClient {
     struct GenerateResponse: Decodable, Equatable {
         let response: String
         let doneReason: String?
+        let done: Bool?
 
         enum CodingKeys: String, CodingKey {
             case response
             case doneReason = "done_reason"
+            case done
         }
     }
 
@@ -98,6 +105,22 @@ struct OllamaClient {
         }
     }
 
+    func modelContextSize(_ model: String) async throws -> Int {
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/show"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["model": model])
+        let (data, response) = try await session.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let info = json["model_info"] as? [String: Any],
+              let context = info.filter({ $0.key.hasSuffix(".context_length") })
+                .compactMap({ $0.value as? Int }).filter({ $0 > 0 }).min() else {
+            throw ClientError.invalidResponse
+        }
+        return context
+    }
+
     /// Starts loading a model before its first summary request. A failed
     /// prewarm is harmless because the actual request reports the error.
     func prewarm(model: String) async {
@@ -124,15 +147,20 @@ struct OllamaClient {
         system: String = "",
         prompt: String,
         temperature: Double = 0.2,
-        maxTokens: Int = 2_048
+        maxTokens: Int = 2_048,
+        contextSize: Int? = nil,
+        requireComplete: Bool = false
     ) async throws -> String {
         let requestBody = GenerateRequest(
             model: model,
             system: system,
             prompt: prompt,
-            options: .init(temperature: temperature, numPredict: maxTokens)
+            options: .init(temperature: temperature, numPredict: maxTokens, numContext: contextSize)
         )
         let result = try await send(requestBody)
+        if requireComplete, result.done != true || result.doneReason != "stop" {
+            throw ClientError.incompleteResponse
+        }
         guard !result.response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ClientError.invalidResponse
         }

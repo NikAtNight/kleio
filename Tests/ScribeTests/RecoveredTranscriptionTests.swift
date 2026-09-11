@@ -14,7 +14,8 @@ final class RecoveredTranscriptionTests: XCTestCase {
             AudioTrack(source: .system, fileName: "call.caf", startOffset: 0.2),
         ], recoveredAt: Date())
 
-        let inputs = try TranscriptionQueue.transcriptionInputs(for: document, folder: folder)
+        XCTAssertThrowsError(try TranscriptionQueue.transcriptionInputs(for: document, folder: folder))
+        let inputs = try TranscriptionQueue.transcriptionInputs(for: document, folder: folder, allowPartialAudio: true)
 
         XCTAssertEqual(inputs.tracks.map(\.source), [.system])
         XCTAssertEqual(inputs.tracks.first?.startOffset, 0.2)
@@ -35,7 +36,8 @@ final class RecoveredTranscriptionTests: XCTestCase {
             AudioTrack(source: .system, fileName: "call.caf"),
         ], recoveredAt: Date())
 
-        let inputs = try TranscriptionQueue.transcriptionInputs(for: document, folder: folder)
+        XCTAssertThrowsError(try TranscriptionQueue.transcriptionInputs(for: document, folder: folder))
+        let inputs = try TranscriptionQueue.transcriptionInputs(for: document, folder: folder, allowPartialAudio: true)
 
         XCTAssertEqual(inputs.tracks.map(\.source), [.microphone])
         XCTAssertEqual(inputs.omitted, ["App audio (call.caf)"])
@@ -68,6 +70,60 @@ final class RecoveredTranscriptionTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("No usable audio remains"))
             XCTAssertTrue(error.localizedDescription.contains("Microphone (missing.caf)"))
         }
+    }
+
+    func testExplicitPartialTranscriptionAllowsAvailableMicrophoneWithoutForgingCrashRecovery() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try writeAudio(to: folder.appendingPathComponent("mic.caf"))
+        let document = ScribeDocument(title: "Meeting", kind: .recording, status: .failed, tracks: [
+            AudioTrack(source: .microphone, fileName: "mic.caf"),
+            AudioTrack(source: .system, fileName: "missing.caf"),
+        ])
+        XCTAssertThrowsError(try TranscriptionQueue.transcriptionInputs(for: document, folder: folder))
+        let inputs = try TranscriptionQueue.transcriptionInputs(for: document, folder: folder, allowPartialAudio: true)
+        XCTAssertEqual(inputs.tracks, [document.tracks[0]])
+        XCTAssertEqual(inputs.omitted, ["App audio (missing.caf)"])
+        XCTAssertNil(document.recoveredAt)
+        XCTAssertEqual(document.tracks.count, 2)
+        // Consent applies to this request, not all subsequent attempts.
+        XCTAssertThrowsError(try TranscriptionQueue.transcriptionInputs(for: document, folder: folder))
+    }
+
+    func testExplicitPartialTranscriptionStillRejectsNoUsableAudio() {
+        let document = ScribeDocument(title: "Missing", kind: .recording, status: .failed, tracks: [
+            AudioTrack(source: .system, fileName: "missing.caf"),
+        ])
+        XCTAssertThrowsError(try TranscriptionQueue.transcriptionInputs(
+            for: document, folder: URL(fileURLWithPath: "/does-not-exist"), allowPartialAudio: true
+        ))
+    }
+
+    func testRecoveryFileCheckDistinguishesMissingEmptyCorruptAndAvailableAudio() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try writeAudio(to: folder.appendingPathComponent("available.caf"))
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        _ = try AVAudioFile(forWriting: folder.appendingPathComponent("empty.caf"), settings: format.settings)
+        try Data("Invalid audio".utf8).write(to: folder.appendingPathComponent("corrupt.caf"))
+        let document = ScribeDocument(title: "Check", kind: .recording, status: .failed, tracks: [
+            AudioTrack(source: .microphone, fileName: "available.caf"),
+            AudioTrack(source: .system, fileName: "missing.caf"),
+            AudioTrack(source: .imported, fileName: "empty.caf"),
+            AudioTrack(source: .imported, fileName: "corrupt.caf"),
+        ])
+        let check = RecordingAudioAvailability.inspect(document, folder: folder)
+        XCTAssertEqual(check.items.map(\.state), [.available, .missing, .empty, .unreadable])
+        XCTAssertEqual(check.availableTracks, [document.tracks[0]])
+        XCTAssertEqual(check.unavailable.count, 3)
+        let inputs = try TranscriptionQueue.transcriptionInputs(for: document, folder: folder, allowPartialAudio: true)
+        XCTAssertEqual(inputs.tracks, check.availableTracks)
+        XCTAssertEqual(inputs.omitted.count, check.unavailable.count)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("corrupt.caf").path))
+        try writeAudio(to: folder.appendingPathComponent("missing.caf"))
+        XCTAssertEqual(RecordingAudioAvailability.inspect(document, folder: folder).items[1].state, .available)
     }
 
     private func writeAudio(to url: URL) throws {

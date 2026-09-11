@@ -11,7 +11,21 @@ swift test --disable-automatic-resolution
 swift build -c release --disable-automatic-resolution
 ```
 
-The focused suites cover speaker correction and undo, transcript word alignment, explicit participant counts, app shortcut persistence, capture target resolution, recording clock behavior, storage failures, and media composition. See `flows/meeting-recording.md` for the recorded results.
+The focused suites cover speaker correction and undo, transcript word alignment, explicit participant counts, app shortcut persistence, capture target resolution, recording clock behavior, storage failures, and media composition. They also exercise the real queue and summary-job owners with controlled inference, recording orchestration with a synthetic driver, and backup restore across a child-process exit. See `flows/meeting-recording.md` for the recorded results.
+
+## Remaining release work
+
+The redesign and automated fixes do not establish reliability on everyday calls. This order reflects the September 10 code and evidence review.
+
+| Priority | Work | Completion evidence |
+| --- | --- | --- |
+| 1 | Validate real Zoom, Teams, Meet/browser, and Slack capture. Include first-run permissions, window/display selection, Bluetooth changes, sleep/wake, and a long call. | Both audio sources remain audible and correctly attributed; app capture excludes unrelated apps; optional video and transcript seeking stay aligned. |
+| 2 | Measure transcription and speaker accuracy on a small set of labelled natural calls. Review short replies, overlap, false speaker splits, and legacy recordings without word timing. | Repeatable results on the same held-out calls, with model versions and scoring rules recorded. Preview any legacy timing repair before replacing saved text. |
+| 3 | Validate native source-loss feedback and disk pressure on a constrained test volume. Local backup/restore and shared manual/automatic disk preflight are implemented and covered with temporary fixtures. | Exercise an actual writer failure without filling the personal machine's main disk. Restore a representative library on another disk and verify playback. Synthetic lifecycle checks do not establish hardware behavior. |
+| 4 | Finish distribution. Version metadata, strict signing, and relocated executable resource checks are implemented. Developer ID signing, notarization, clean-Mac model execution, and an update channel remain. | Install and run offline on a clean Mac after model setup, then upgrade without losing its library. Resolve Hub's generated GPT-2/T5 resource accessor before relying on those fallback defaults. |
+| Deferred | Revisit optional cloud-provider integration and migrate provider keys from preferences to Keychain. | The user deferred cloud work. Test any future credential migration with dummy values before enabling it. |
+
+Source boundaries: `RecordingSession.swift`, `RecordingCaptureDriver.swift`, `LibraryStore.swift`, `LibraryBackup.swift`, `DocumentEditing.swift`, `SummaryJobs.swift`, `TranscriptionQueue.swift`, `SpeakerBenchmark.swift`, `SettingsView.swift`, `SummaryService.swift`, and the packaging scripts. RecordingSession checks for at least 1 GB available before manual or automatic startup. Unavailable capacity metadata does not block startup. Recovery from a short generated movie does not establish recovery from every interrupted meeting or disk failure.
 
 ## Native acceptance checks
 

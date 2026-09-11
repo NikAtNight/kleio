@@ -374,6 +374,8 @@ struct GeneralSettings: View {
                     .foregroundStyle(.secondary)
             }
 
+            LibraryBackupSettings()
+
             LabeledContent("Library:") {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([LibraryStore.baseURL])
@@ -557,7 +559,10 @@ struct AISettings: View {
                 Picker("Model:", selection: $ollamaModel) {
                     Text("Choose a model").tag("")
                     ForEach(ollamaModels, id: \.self) { installedModel in
-                        Text(installedModel).tag(installedModel)
+                        Text(SummaryService.supportsSummaries(model: installedModel)
+                             ? installedModel : "\(installedModel) · Dictation cleanup only")
+                            .tag(installedModel)
+                            .disabled(!SummaryService.supportsSummaries(model: installedModel))
                     }
                 }
             } else if selectedProvider != .appleIntelligence {
@@ -566,6 +571,13 @@ struct AISettings: View {
                     text: selectedProvider == .ollama ? $ollamaModel : $model,
                     prompt: Text(selectedProvider.defaultModel)
                 )
+            }
+
+            if selectedProvider == .ollama, !SummaryService.supportsSummaries(model: ollamaModel) {
+                Label("s1-mini is for dictation cleanup. Choose a general-purpose model for summaries.",
+                      systemImage: "exclamationmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
             }
 
             VStack(alignment: .leading, spacing: 4) {

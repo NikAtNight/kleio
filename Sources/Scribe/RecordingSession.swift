@@ -1,6 +1,5 @@
 import Foundation
 import SwiftUI
-import ScreenCaptureKit
 
 enum RecordingMode: String, CaseIterable, Identifiable {
     case meeting
@@ -92,13 +91,16 @@ struct LevelHistory: Equatable {
 /// starts, so audio is recoverable if the app dies).
 @MainActor
 final class RecordingSession: ObservableObject {
+    static let minimumFreeDiskBytes: Int64 = 1_000_000_000
+    static let insufficientDiskMessage = "Not enough free disk space to start recording. Free at least 1 GB, then try again."
+
     @Published private(set) var isRecording = false
     @Published private(set) var isPaused = false
     @Published private(set) var isStarting = false
     @Published private(set) var isFinalizing = false
-    @Published private(set) var hasPendingSave = false
+    var hasPendingSave: Bool { recordingLibrary?.hasPendingRecordingSaves == true }
     var isBusy: Bool { isRecording || isStarting || isFinalizing || hasPendingSave }
-    var pendingSaveDocumentID: UUID? { pendingFinalSave?.document.id }
+    var pendingSaveDocumentID: UUID? { recordingLibrary?.pendingRecordingSaveIDs.first }
     @Published private(set) var healthMessage: String?
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var micLevel: Float = 0
@@ -111,10 +113,9 @@ final class RecordingSession: ObservableObject {
     private(set) var lastWaveformAppend = Date.distantPast
     static let waveformSampleInterval: TimeInterval = 0.05
 
-    private var mic: MicRecorder?
-    private var tap: SystemAudioTap?
-    private var screen: ScreenRecorder?
-    private let picker = ScreenCapturePicker()
+    private let dependencies: RecordingSessionDependencies
+    private weak var recordingLibrary: LibraryStore?
+    private var capture: (any RecordingCaptureDriving)?
     private var clock: RecordingClock?
     private var application: RecordingApplication?
     private var processIDs: [UInt32] = []
@@ -126,10 +127,13 @@ final class RecordingSession: ObservableObject {
     private var cancelStart = false
     private var captureFailure: String?
     private var failureState = CaptureFailureState()
-    private var pendingFinalSave: (document: ScribeDocument, discard: Bool, enqueue: Bool)?
     private var sampleCount = 0
     private var micLevelHistory = LevelHistory(minimumInterval: 0)
     private var systemLevelHistory = LevelHistory(minimumInterval: 0)
+
+    init(dependencies: RecordingSessionDependencies = .live) {
+        self.dependencies = dependencies
+    }
 
     func start(
         mode: RecordingMode,
@@ -141,7 +145,7 @@ final class RecordingSession: ObservableObject {
         microphoneSpeakerName: String = "Me",
         expectedRemoteSpeakerCount: Int? = nil
     ) async {
-        guard !isBusy else { return }
+        guard !isBusy, !library.hasPendingRecordingSaves, useLibrary(library) else { return }
         isStarting = true
         cancelStart = false
         lastError = nil
@@ -151,13 +155,18 @@ final class RecordingSession: ObservableObject {
         defer { isStarting = false }
 
         do {
-            if mode.usesMic, !(await MicRecorder.requestPermission()) {
+            if let available = dependencies.availableDiskCapacity(library.storageURL),
+               available < Self.minimumFreeDiskBytes {
+                throw CaptureStartError.message(Self.insufficientDiskMessage)
+            }
+            try checkStartCancellation()
+            let capture = dependencies.makeCapture()
+            self.capture = capture
+            if mode.usesMic, !(await capture.requestMicrophonePermission()) {
                 throw MicRecorder.MicError.permissionDenied
             }
             try checkStartCancellation()
-            let filter: SCContentFilter?
-            if let videoMode { filter = try await picker.select(videoMode) }
-            else { filter = nil }
+            if let videoMode { try await capture.prepareVideo(videoMode) }
             try checkStartCancellation()
             processIDs = try application.map { try ApplicationAudioResolver.resolve($0) } ?? []
             var doc = ScribeDocument(
@@ -197,48 +206,41 @@ final class RecordingSession: ObservableObject {
                     if self.isRecording, !self.isStarting { self.finish(library: library, queue: nil, discard: false) }
                 }
             }
-            if mode.usesSystem {
-                let tap = SystemAudioTap()
-                self.tap = tap
-                try tap.start(writingTo: folder.appendingPathComponent("system.caf"),
-                    processes: application == nil ? nil : processIDs, clock: clock, onError: onError) { [weak self] level in
+            try await capture.start(
+                mode: mode,
+                folder: folder,
+                processes: application == nil ? nil : processIDs,
+                clock: clock,
+                onError: onError,
+                onWarning: { [weak self] message in
+                    Task { @MainActor in
+                        guard self?.activeDocumentID == documentID else { return }
+                        self?.healthMessage = message
+                    }
+                },
+                onMicLevel: { [weak self] level in
+                    Task { @MainActor in
+                        guard let self, self.activeDocumentID == documentID, self.isRecording, !self.isPaused else { return }
+                        self.micLevel = level
+                        self.lastMicCallback = RecordingClock.now
+                    }
+                },
+                onSystemLevel: { [weak self] level in
                     Task { @MainActor in
                         guard let self, self.activeDocumentID == documentID, self.isRecording, !self.isPaused else { return }
                         self.systemLevel = level
                         self.lastSystemCallback = RecordingClock.now
                     }
-                }
-            }
-            if mode.usesMic {
-                let mic = MicRecorder()
-                self.mic = mic
-                try mic.start(writingTo: folder.appendingPathComponent("microphone.caf"), clock: clock,
-                    onError: onError, onWarning: { [weak self] message in
-                        Task { @MainActor in
-                            guard self?.activeDocumentID == documentID else { return }
-                            self?.healthMessage = message
-                        }
-                    }) { [weak self] level in
-                        Task { @MainActor in
-                            guard let self, self.activeDocumentID == documentID, self.isRecording, !self.isPaused else { return }
-                            self.micLevel = level
-                            self.lastMicCallback = RecordingClock.now
-                        }
+                },
+                onFirstVideoFrame: { [weak self, weak library] offset in
+                    Task { @MainActor in
+                        guard let self, self.activeDocumentID == documentID, !self.isFinalizing,
+                              let library, var document = library.document(id: documentID) else { return }
+                        document.videoTracks?[0].startOffset = offset
+                        if !library.update(document) { onError(library.lastError ?? "The video start time could not be saved.") }
                     }
-            }
-            if let filter {
-                let screen = ScreenRecorder()
-                self.screen = screen
-                try await screen.start(filter: filter, writingTo: folder.appendingPathComponent("screen.mov"), clock: clock,
-                    onError: onError, onFirstFrame: { [weak self, weak library] offset in
-                        Task { @MainActor in
-                            guard let self, self.activeDocumentID == documentID, !self.isFinalizing,
-                                  let library, var document = library.document(id: documentID) else { return }
-                            document.videoTracks?[0].startOffset = offset
-                            if !library.update(document) { onError(library.lastError ?? "The video start time could not be saved.") }
-                        }
-                    })
-            }
+                }
+            )
             try checkStartCancellation()
             if let message = failureState.message { throw CaptureStartError.message(message) }
             isRecording = true
@@ -251,28 +253,32 @@ final class RecordingSession: ObservableObject {
             self.timer = timer
         } catch {
             clock?.stop()
-            mic?.stop()
-            tap?.stop()
-            mic = nil
-            tap = nil
-            if let screen { _ = try? await screen.stop() }
-            screen = nil
-            picker.close()
+            capture?.stopAudio()
+            _ = try? await capture?.stopVideo()
+            capture?.close()
+            capture = nil
             if !(error is CancellationError) { lastError = error.localizedDescription }
             if let id = activeDocumentID, var doc = library.document(id: id) {
                 doc.status = .recovered
                 doc.recoveredAt = Date()
                 doc.duration = clock?.time() ?? 0
                 doc.failureReason = lastError ?? "Recording setup was cancelled. Any captured files were kept."
-                if !library.finalizeRecording(doc) {
-                    pendingFinalSave = (doc, false, false)
-                    hasPendingSave = true
+                if !library.finalizeRecording(doc, retryDisposition: .keep) {
                     lastError = library.lastError
                 }
             }
             activeDocumentID = nil
             activeCalendarEventTitle = nil
         }
+    }
+
+    private func useLibrary(_ library: LibraryStore) -> Bool {
+        if let owner = recordingLibrary, owner !== library, isBusy {
+            lastError = "Finish saving the current recording before using another library."
+            return false
+        }
+        recordingLibrary = library
+        return true
     }
 
     private enum CaptureStartError: LocalizedError {
@@ -289,8 +295,8 @@ final class RecordingSession: ObservableObject {
         elapsed = clock?.time() ?? elapsed
         sampleCount += 1
         let time = Double(sampleCount) * Self.waveformSampleInterval
-        if mic != nil, micLevelHistory.append(micLevel, at: time) { micHistory = micLevelHistory.samples }
-        if tap != nil, systemLevelHistory.append(systemLevel, at: time) { systemHistory = systemLevelHistory.samples }
+        if capture?.hasMicrophone == true, micLevelHistory.append(micLevel, at: time) { micHistory = micLevelHistory.samples }
+        if capture?.hasSystemAudio == true, systemLevelHistory.append(systemLevel, at: time) { systemHistory = systemLevelHistory.samples }
         lastWaveformAppend = Date()
         let now = RecordingClock.now
         if now >= nextProcessCheck {
@@ -299,11 +305,11 @@ final class RecordingSession: ObservableObject {
             if let application {
                 do {
                     let ids = try ApplicationAudioResolver.resolve(application)
-                    if ids != processIDs { try tap?.updateProcesses(ids); processIDs = ids }
+                    if ids != processIDs { try capture?.updateProcesses(ids); processIDs = ids }
                 } catch { warning = error.localizedDescription }
             }
-            if mic != nil, now - lastMicCallback > 4 { warning = "No microphone data is arriving. Check the input device." }
-            if tap != nil, now - lastSystemCallback > 4 { warning = "No app audio data is arriving. Check the selected app and audio permissions." }
+            if capture?.hasMicrophone == true, now - lastMicCallback > 4 { warning = "No microphone data is arriving. Check the input device." }
+            if capture?.hasSystemAudio == true, now - lastSystemCallback > 4 { warning = "No app audio data is arriving. Check the selected app and audio permissions." }
             healthMessage = warning
         }
     }
@@ -346,17 +352,15 @@ final class RecordingSession: ObservableObject {
         elapsed = clock?.time() ?? elapsed
         timer?.invalidate()
         timer = nil
-        mic?.stop()
-        tap?.stop()
-        mic = nil
-        tap = nil
+        capture?.stopAudio()
         micLevel = 0
         systemLevel = 0
         resetLevelHistories()
+        let capture = self.capture
         finalizationTask = Task { @MainActor in
             defer {
-                self.screen = nil
-                self.picker.close()
+                capture?.close()
+                self.capture = nil
                 self.isRecording = false
                 self.isPaused = false
                 self.isFinalizing = false
@@ -364,65 +368,70 @@ final class RecordingSession: ObservableObject {
                 self.activeCalendarEventTitle = nil
                 self.finalizationTask = nil
             }
-            var videoDuration: TimeInterval?
-            if let screen = self.screen {
-                do { videoDuration = try await screen.stop() }
+            var videoResult: RecordingVideoStopResult?
+            if let capture {
+                do { videoResult = try await capture.stopVideo() }
                 catch { self.captureFailure = error.localizedDescription; self.lastError = error.localizedDescription }
             }
             guard var doc = library.document(id: docID) else { return }
             doc.duration = max(self.elapsed, doc.tracks.map {
-                ($0.startOffset ?? 0) + audioDuration(of: library.folder(for: doc.id).appendingPathComponent($0.fileName))
+                ($0.startOffset ?? 0) + self.dependencies.audioDuration(library.folder(for: doc.id).appendingPathComponent($0.fileName))
             }.max() ?? 0)
-            if let videoDuration, doc.videoTracks?.isEmpty == false {
-                doc.videoTracks?[0].duration = videoDuration
-                let offset = self.screen?.startOffset ?? doc.videoTracks?[0].startOffset ?? 0
+            if let videoResult, doc.videoTracks?.isEmpty == false {
+                doc.videoTracks?[0].duration = videoResult.duration
+                let offset = videoResult.startOffset ?? doc.videoTracks?[0].startOffset ?? 0
                 doc.videoTracks?[0].startOffset = offset
             }
             self.captureFailure = self.failureState.message ?? self.captureFailure
             doc.status = self.captureFailure == nil && !discard ? .queued : .recovered
             if doc.status == .recovered { doc.recoveredAt = doc.recoveredAt ?? Date() }
             doc.failureReason = self.captureFailure
-            guard library.finalizeRecording(doc) else {
-                self.pendingFinalSave = (doc, discard, self.captureFailure == nil && queue != nil)
-                self.hasPendingSave = true
+            let disposition: PendingRecordingSave.Disposition = discard
+                ? .discard : (self.captureFailure == nil && queue != nil ? .enqueue : .keep)
+            guard library.finalizeRecording(doc, retryDisposition: disposition) else {
                 self.lastError = library.lastError
                 return
             }
             if discard {
                 if !library.delete(doc) { self.lastError = library.lastError }
             } else if self.captureFailure == nil {
-                queue?.enqueue(doc.id)
+                if let queue { self.dependencies.enqueue(queue, doc.id) }
             }
         }
     }
 
     func retryFinalSave(library: LibraryStore, queue: TranscriptionQueue) {
-        guard let pending = pendingFinalSave else { return }
-        // Keep any title or note edits made while the save was pending.
-        var doc = library.document(id: pending.document.id) ?? pending.document
-        doc.status = pending.document.status
-        doc.failureReason = pending.document.failureReason
-        doc.duration = pending.document.duration
-        doc.tracks = pending.document.tracks
-        doc.videoTracks = pending.document.videoTracks
-        guard library.finalizeRecording(doc) else { lastError = library.lastError; return }
-        hasPendingSave = false
-        pendingFinalSave = nil
+        guard useLibrary(library) else { return }
+        guard let id = pendingSaveDocumentID,
+              let disposition = library.retryPendingRecordingSave(id) else {
+            if library.hasPendingRecordingSaves { lastError = library.lastError }
+            return
+        }
         lastError = nil
-        if pending.discard {
-            if !library.delete(doc) { lastError = library.lastError }
-        } else if pending.enqueue { queue.enqueue(doc.id) }
+        switch disposition {
+        case .keep:
+            break
+        case .enqueue:
+            dependencies.enqueue(queue, id)
+        case .discard:
+            if let document = library.document(id: id), !library.delete(document) { lastError = library.lastError }
+        }
     }
 
     func prepareToQuit(library: LibraryStore, queue: TranscriptionQueue) async {
+        guard useLibrary(library) else { return }
         if isStarting {
             cancelStart = true
-            picker.cancel()
+            await capture?.cancelStart()
             while isStarting { try? await Task.sleep(nanoseconds: 20_000_000) }
         }
         if isRecording, !isFinalizing { stop(library: library, queue: queue) }
         await finalizationTask?.value
         if hasPendingSave { retryFinalSave(library: library, queue: queue) }
+    }
+
+    func waitForFinalization() async {
+        await finalizationTask?.value
     }
 
     private static func defaultTitle(for mode: RecordingMode) -> String {

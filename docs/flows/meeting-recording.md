@@ -103,3 +103,104 @@ Integration evidence after the refinement:
 Evidence is retained under ignored `build/kleio-review/`, with native previews, speaker/capture fixtures and reports, and build/test logs. The first rebuild is commit `4fe4ff0`; refinement evidence refers to the changes since that commit.
 
 Installed `/Applications/Kleio.app` after checking that all five existing documents were ready. The old app is backed up at `build/app-backups/install.Bsyypg/Scribe.app`. Code-signature verification passed, the installed executable matches the tested package, the app opened a window, and all five pre-existing document manifests remained byte-for-byte unchanged.
+
+## Transcript turn order correction
+
+Requirement source: the user's September 10 report that a microphone sentence appears before a remote reply even when part of that sentence was spoken afterward, and playback then scrolls upward. Main owns this correction.
+
+Observed causes:
+
+- Legacy recordings store whole recognizer segments without word timing. Sorting those chunks by their start cannot place an intervening reply inside a microphone chunk.
+- Playback previously selected the last segment containing the current time. After a short reply ended, an older, longer microphone segment became active again and triggered upward scrolling.
+- Speaker heading grouping only hides repeated headings. It does not merge or reorder text.
+
+The queue now applies track offsets, preserves the raw transcript, and calls `TranscriptTiming.chronologicalTurns` before saving display segments. Complete word alignment trims decoder silence padding. Speech from another audio source wholly inside a word gap splits the surrounding segment into separate turns. Continuous overlapping speech remains overlapping. Missing, invalid, or edited word alignment leaves the segment intact. Original word timings, source and speaker identity survive, and the first piece keeps its segment ID. `SpeakerDiarizer` reuses the word alignment and splitting code. The persisted order is shared by transcript reading, full text and exports.
+
+`TranscriptView` uses `TranscriptTiming.activeSegmentID` to choose the latest-started segment, then checks whether that segment is still active. It never falls back to an older enclosing segment. Explicit backward seeking still works.
+
+Acceptance evidence:
+
+- PASS: `swift test --disable-automatic-resolution`, 141 tests with zero failures. `TranscriptTimingTests` covers microphone/app-audio replies, repeated pauses, short replies, overlapping interruptions, equal starts, legacy and corrected text, invalid timing, punctuation, stable identities, and backward seeking. Its persistence/export check exercises reopening a temporary library and TXT/SRT/VTT/CSV ordering. `TranscriptionApplicationTests` covers the queue's first transcription, legacy raw preservation, later re-transcription, and concurrent edits.
+- PASS: a local diagnostic sampled the selected legacy recording's full saved timeline every 100 ms. The old selector moved backward 22 times; the new selector moved backward zero times across 347 segments. This verifies selection from saved timing, not the accuracy of those timestamps against every spoken word.
+- LIMITED: local transcription of a 90-second excerpt supplied word timing but did not reliably retain short replies. It was not used to replace the historical transcript. Exact repair of that transcript's sentence boundaries remains unverified; the playback correction works with its existing data.
+
+Evidence is under ignored `build/kleio-timing-review/`. Personal audio and transcript diagnostics stay local and are excluded from source control. The diagnostic test was moved out of the test target after running. Permanent regression fixtures contain synthetic text only. This section refers to the uncommitted timing changes after `ff3008e` on macOS with Swift 6.3.3; it does not supersede the recording and model-accuracy limits above.
+
+- PASS: final `./scripts/make-app.sh --install`, release build, code-signature verification, and installed executable comparison. `/Applications/Kleio.app` was replaced and launched; the previous app is in `build/app-backups/install.rc058a/Kleio.app`. All five recording manifests remained byte-for-byte unchanged.
+- REVIEW: independent read-only review requested queue-level preservation coverage, now included. A concern about interruptions beginning before the microphone pause was resolved with an explicit regression: the resumed microphone phrase belongs after the reply, while the initial overlap stays intact. Grouping the entire remote recognizer chunk would reintroduce the original ordering problem.
+
+## Recording error and recovery view
+
+Requirement source: the user's September 10 screenshot of a generic transcription failure with a retry button that cannot repair missing audio. Main owns implementation; an independent read-only review checked recovery behavior and remaining release gaps.
+
+`DocumentDetailView` now uses `RecordingProblemView` for failed and recovered recordings. The view retains the recording title, date, duration, and navigation. It shows the state of each audio source, a specific explanation, and actions appropriate to the files present. Raw error text and filenames are in a collapsed details disclosure. A saved transcript remains accessible after a failed retry. This follows [Apple's guidance on useful error messages and actions](https://developer.apple.com/design/human-interface-guidelines/alerts).
+
+`RecordingAudioAvailability` is shared by this view and `TranscriptionQueue`. It distinguishes available, missing, empty, and unreadable audio by opening each file and reading its first buffer. This check does not guarantee the rest of a file will decode. Check again reruns inspection after files are restored; it does not alter media.
+
+Transcribing only the available sources requires an explicit action such as **Transcribe microphone only**. Ordinary retries, including recovered recordings, reject missing sources. Partial processing retains source references and publishes a warning with the completed transcript. It does not invent a crash-recovery timestamp. A failed retry or an edit made during processing leaves the prior transcript's warning intact. Pending recording saves block enqueueing.
+
+Acceptance evidence for the uncommitted changes after `ff3008e`:
+
+- PASS: `swift test --disable-automatic-resolution`, 145 tests with zero failures. Recovery tests cover missing, empty, corrupt, restored, and available files, explicit partial processing, and refusal when no usable audio remains. Transcript application tests cover warning changes and concurrent edits.
+- PASS: five native rendering fixtures cover light/dark appearances, a narrow window, missing or partially available sources, ordinary retry, and recovered audio. These establish rendering, not button interaction or live capture.
+- PASS: a synthetic microphone recording ran through the real queue and the cached Small English model. Ordinary retry failed without replacing saved text or its warning; explicit partial processing succeeded, retained source metadata and the original transcript, and identified omitted app audio. No private recording was reprocessed.
+- PASS: `git diff --check` and debug build. Existing cached-module warnings remain.
+
+Local evidence is under ignored `build/kleio-error-review/`. The temporary native rendering and model-dependent queue tests were moved out of the permanent test target after verification. Remaining release work is prioritized in [the acceptance checklist](../meeting-recorder-validation.md#remaining-release-work).
+
+- PASS: `./scripts/make-app.sh --install` completed the release build, signed and installed `/Applications/Kleio.app`, and launched it. The installed executable and icon match the tested package; strict code-signature verification passed. All five existing recording manifests remained byte-for-byte unchanged. The previous app is preserved in `build/app-backups/install.D09bBM/Kleio.app`. Clean-machine distribution remains unverified.
+
+## Summary generation correction
+
+Requirement source: the user's September 10 report that a generated summary repeated a passage and misrepresented the conversation. Main owns implementation and local acceptance. An independent read-only review inspected model selection, provider behavior, stale writes, and tests.
+
+Observed cause: the selected summary provider was local Ollama using s1-mini, which is a transcript normalizer rather than a general instruction model. The [publisher's model card](https://huggingface.co/superwhisper/s1-mini) documents that restriction. The old summary request supplied no system instruction, guessed a 150,000-character input limit, ignored Ollama's completion reason, and saved any nonempty output. Source inspection also found recorded narration in the selected transcript; summarization must not turn that material into participants' commitments.
+
+The corrected flow runs from `TranscriptView.summarize` through `SummaryService.summarize` and the chosen provider, then `applyingSummary` and `LibraryStore.update`:
+
+- AI Settings marks s1-mini as dictation-only, and SummaryService rejects it before inference. Dictation Settings and `TranscriptCleaner` retain their existing model selection and control-line behavior.
+- Provider, model, key, and formatting prompt are captured for the entire job. Local generation stays on localhost; no provider fallback or automatic download is introduced.
+- Ollama's `/api/show` supplies the model's declared context limit, capped at 32,768 for a summary request. Missing metadata fails before inference. The request explicitly sets `num_ctx` and reserves 768 output tokens. Apple Intelligence uses its documented 4,096-token context. Byte budgets reserve instructions, output, and message framing; long sources split at line boundaries where possible and retain every character.
+- `generateSummary` processes excerpts sequentially, then condenses their notes until the final summary fits. Intermediate notes use grounding instructions without the final formatting contract. Failure or non-shrinking output stops the operation. The prompt distinguishes commitments from suggestions, past actions, stories, and recorded media.
+- Provider finish reasons, empty output, excessive size, and repeated 12-word passages are checked before saving. These checks do not prove semantic accuracy. The same output check collapses invalid old summaries behind a disclosure with a regeneration explanation.
+- `sourceText` supplies metadata, speaker labels, transcript text, and notes for both generation and stale-write checks. It excludes prior generated summaries. `applyingSummary` refuses a changed source or another saved summary. Deleted recordings and failed library writes report an error instead of pretending the result was saved.
+
+Acceptance evidence for the uncommitted changes after `ff3008e`:
+
+- PASS: `swift test --disable-automatic-resolution`, 156 tests with zero failures. Focused summary tests cover task eligibility, context metadata, truncated output, lossless Unicode chunking, inclusion of the final source passage, final synthesis, intermediate failure, empty input, large prompts, source metadata, and concurrent edits. Existing dictation-cleanup checks pass.
+- PASS: native light/dark summary rendering, including the collapsed invalid-output state. These fixtures use synthetic text and establish rendering, not model accuracy.
+- PASS, execution only: cached Gemma 3 4B ran both a synthetic meeting and the selected local transcript through the updated pipeline, including bounded multi-part processing and a full-source request with a declared larger context.
+- FAIL, semantic acceptance: Gemma 3 4B still invented decisions and treated narrative events as action items. The candidate outputs were not saved to the user's library and this model was not selected automatically.
+- NOT RUN: Apple Intelligence generation, which is disabled on this Mac, cloud-provider requests, and a larger local model. The user chose to finish the app fix without a model download. No model was downloaded, no summary provider was changed, and the failed candidate outputs remain local diagnostics. Summary accuracy remains unresolved for the installed models tested here.
+
+Evidence, synthetic fixtures, and private local diagnostics are under ignored `build/kleio-summary-review/`. Temporary model and rendering tests were moved out of the permanent target after running. References: [Ollama generate API](https://docs.ollama.com/api/generate), [Apple context limits](https://developer.apple.com/documentation/technotes/tn3193-managing-the-on-device-foundation-model-s-context-window), and [OpenAI completion limits](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create). OpenAI's output bound uses `max_completion_tokens`; no cloud key or private transcript was sent during verification.
+
+- PASS: final focused summary and dictation-cleanup run, 20 tests with zero failures. `./scripts/make-app.sh --install` built, signed, installed, and launched the update. The installed executable matches the package and strict signature verification passed. All five recording manifests remain byte-for-byte unchanged, including their summaries. Provider/model preferences are unchanged. The previous app is preserved in `build/app-backups/install.lYNiAt/Kleio.app`.
+## Reliability follow-up, September 10
+
+Owner: the integrating agent. Requirement: fix the architecture review findings in parallel, with natural Zoom, Teams, Meet, and Slack evaluation deferred until the user has representative recordings. No new model downloads or cloud integration. Workers used isolated worktrees; main reviewed and integrated their changes without replacing earlier uncommitted work.
+
+Implemented boundaries:
+
+- `TranscriptionQueue` owns each decoding and speaker-analysis job through persistence. Every phase saves before continuing or exporting. A failed write retains the completed result for Retry Save without running the model again. Cancellation targets the selected document, including queued work. Deleted documents are never recreated by late results. Quit cancels queued inference, drains active work, and tries retained saves before permitting exit.
+- `DocumentEditing` applies transcript, title, note, replacement, and speaker edits to the latest document. Views clear their draft or display success only after persistence. Failed speaker undo restores its undo entry for retry without replacing later text edits.
+- `LibraryStore` owns each pending recording's final document and retry disposition. `RecordingSession` uses that state for retry, deletion protection, and quit. The internal `RecordingCaptureDriving` boundary lets lifecycle tests control startup, callback failure, and asynchronous video finalization without opening real devices. Manual and automatic startup share the 1 GB disk preflight. Cancelling native startup stops video only after startup settles.
+- `SummaryJobs` belongs to the app, survives navigation, prevents duplicate jobs, and retains valid results for save retry. Pending saves remain visible while browsing other recordings. Persistence marks a retained summary out of date when its transcript, notes, title, or speaker labels change. Regeneration clears that marker only after validating its source. Markdown and HTML exports label stale summaries. Historical summaries have no source fingerprint and are not retroactively classified.
+- `LibraryBackup` copies media, manifests, saved people, voice profiles, and allowlisted preferences. It excludes downloaded models and credentials. SHA-256 inventories detect changed or incomplete copies, and inspection validates recording references and runtime metadata. Restore stages a verified copy, preserves the previous library, and records each transaction in a journal before replacing data. Startup completes or rolls back an interrupted restore before opening stores. `LibraryBackupJobs` owns Settings operations and normal quit waits for them; hashing runs away from the UI thread.
+- Packaging records version, build number, revision, and modified-checkout state. The verifier checks signatures, metadata, architecture, dependency resources, and direct resource reads by the relocated real executable before any library or model opens. It does not validate the upstream Hub generated accessor or run a model. GPT-2/T5 fallback lookup still requires an upstream or deliberate private dependency fix. Developer ID signing and notarization remain release work.
+
+Acceptance evidence:
+
+- PASS: `swift test --disable-automatic-resolution`, 212 permanent tests with zero failures. The temporary native rendering helper was moved out of the test target after its own successful run. It includes controlled queue/summary completion in both orders, simultaneous retained saves, edit and undo failures, queued cancellation, deletion, partial-audio consent, startup cancellation, failed final saves, and a second library's refusal to take an unsaved recording.
+- PASS: backup round-trip, changed-file rejection, hash-consistent invalid metadata rejection, model and credential preservation, and scheduled restore. Separate child processes exit before and after the restore commit; the next launch restores the prior library or finishes committed cleanup as appropriate. Repeated recovery preserves the result.
+- PASS: native light/dark summary rendering and a pending-save fixture using synthetic text. The previews establish rendering, not complete UI interaction or model accuracy.
+- PASS: independent reviews of job continuation, editing, capture ownership, backup recovery, and app integration. Findings led to added coverage for startup ordering, two-library ownership, stale summaries, restore cleanup, and backup work during quit.
+
+Local evidence is under ignored `build/kleio-reliability-review/` and `build/reliability-*.log`. Synthetic capture-driver media is placeholder data used only to test orchestration. Existing generated-audio/video suites test actual file timing and composition separately. No private recording was reprocessed, no summary model was changed, and no model was downloaded.
+
+Not run: natural-call evaluation, live device or Bluetooth failure, sleep/wake, long sessions, a physically constrained volume, clean-Mac model execution, and public notarized distribution. Summary factual accuracy remains unresolved for the previously tested installed model. The user will supply real meetings for the next evaluation round.
+
+- PASS: the final backup job tests cover normal quit while copying or scheduling, duplicate starts, failed work that finishes before quit reaches it, and cancelled restore confirmation. Both final validation passes run outside the UI actor.
+- PASS: `./scripts/make-app.sh --install`, including release compilation, strict signature verification, and direct resource reads by the relocated executable. `/Applications/Kleio.app` was replaced and is running. The installed executable matches `build/Kleio.app`; its own `--package-self-check` passes. Version is 1.0.0, build 39.1, revision ff3008ec8862, modified checkout. Existing dependency and cached-module warnings remain.
+- PASS: all 18 library and people-store files remained byte-for-byte unchanged after installation, including the five recording manifests and media. Summary and transcription model selections also remained unchanged. The previous app is retained at `build/app-backups/install.lUCzdQ/Kleio.app`.
+- PASS: `git diff --check`, `bash -n scripts/make-app.sh scripts/verify-app.sh`, and `plutil -lint Resources/Info.plist`. No commit, push, dependency upgrade, model execution, model download, or cloud request was part of this reliability follow-up. The complete local source diff is retained at `build/kleio-reliability-review/changes.patch`.

@@ -44,6 +44,24 @@ enum Main {
 
     static func main() {
         let args = CommandLine.arguments
+        if args.dropFirst().first == "--package-self-check" {
+            do {
+                guard Bundle.main.bundleIdentifier == "app.talix.scribe",
+                      let resources = Bundle.main.resourceURL else {
+                    throw NSError(domain: "Kleio.Package", code: 1, userInfo: [NSLocalizedDescriptionKey: "The app bundle could not be located."])
+                }
+                let hub = resources.appendingPathComponent("swift-transformers_Hub.bundle")
+                for name in ["gpt2_tokenizer_config", "t5_tokenizer_config"] {
+                    let data = try Data(contentsOf: hub.appendingPathComponent(name + ".json"))
+                    _ = try JSONSerialization.jsonObject(with: data)
+                }
+                print("Packaged resources are readable from the running app.")
+                return
+            } catch {
+                FileHandle.standardError.write(Data("Package check failed: \(error.localizedDescription)\n".utf8))
+                exit(1)
+            }
+        }
         if args.dropFirst().first == "--benchmark-speakers" {
             Task.detached {
                 do {
@@ -86,6 +104,16 @@ enum Main {
             }
             RunLoop.main.run()
         }
+        do {
+            try LibraryBackup.restoreOnLaunch(support: LibraryBackup.supportURL, defaults: .standard, domain: "app.talix.scribe")
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Library restore couldn't finish"
+            alert.informativeText = error.localizedDescription + " Quit and reopen Kleio after checking the backup location and available disk space."
+            alert.addButton(withTitle: "Quit")
+            alert.runModal()
+            return
+        }
         ScribeApp.main()
     }
 }
@@ -127,6 +155,8 @@ struct ScribeApp: App {
     @StateObject private var library = LibraryStore()
     @StateObject private var modelManager = ModelManager()
     @StateObject private var queue = TranscriptionQueue()
+    @StateObject private var summaries = SummaryJobs()
+    @StateObject private var backups = LibraryBackupJobs()
     @StateObject private var recording = RecordingSession()
     @StateObject private var appState = AppState()
     @StateObject private var replacementStore = ReplacementStore()
@@ -141,6 +171,7 @@ struct ScribeApp: App {
                 .environmentObject(library)
                 .environmentObject(modelManager)
                 .environmentObject(queue)
+                .environmentObject(summaries)
                 .environmentObject(recording)
                 .environmentObject(appState)
                 .environmentObject(replacementStore)
@@ -154,6 +185,7 @@ struct ScribeApp: App {
                         replacementStore: replacementStore,
                         attendeeNamesProvider: calendarSync.attendeeNames(forEventID:)
                     )
+                    summaries.configure(library: library)
                     watchFolders.configure(library: library, queue: queue)
                     dictation.configure(
                         modelManager: modelManager,
@@ -164,10 +196,15 @@ struct ScribeApp: App {
                         let ids = Importer.importFiles(urls, library: library, queue: queue)
                         if let first = ids.first { appState.select(document: first) }
                     }
+                    appDelegate.hasBackgroundWork = { queue.isBusy || summaries.isBusy || backups.isWorking }
                     appDelegate.recording = recording
                     appDelegate.finishRecording = {
                         await recording.prepareToQuit(library: library, queue: queue)
-                        return !recording.hasPendingSave
+                        let transcriptSaved = await queue.prepareToQuit()
+                        let summariesSaved = await summaries.prepareToQuit()
+                        let backupFinished = await backups.prepareToQuit()
+                        return !recording.isBusy && !queue.isBusy && !summaries.isBusy && !backups.isWorking
+                            && transcriptSaved && summariesSaved && backupFinished
                     }
                     appDelegate.calendarSync = calendarSync
                     appDelegate.autoRecordArbiter = autoRecordArbiter
@@ -199,6 +236,7 @@ struct ScribeApp: App {
             MenuBarView()
                 .environmentObject(library)
                 .environmentObject(queue)
+                .environmentObject(summaries)
                 .environmentObject(recording)
                 .environmentObject(appState)
                 .environmentObject(dictation)
@@ -211,6 +249,11 @@ struct ScribeApp: App {
 
         Settings {
             SettingsView()
+                .environmentObject(backups)
+                .environmentObject(library)
+                .environmentObject(recording)
+                .environmentObject(queue)
+                .environmentObject(summaries)
                 .environmentObject(modelManager)
                 .environmentObject(replacementStore)
                 .environmentObject(watchFolders)
@@ -229,17 +272,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     weak var autoRecordArbiter: AutoRecordArbiter?
     weak var recording: RecordingSession?
     var finishRecording: (() async -> Bool)?
+    var hasBackgroundWork: (() -> Bool)?
     private var terminating = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let recording, recording.isBusy else {
+        guard recording?.isBusy == true || hasBackgroundWork?() == true else {
             return .terminateNow
         }
         guard !terminating else { return .terminateLater }
         terminating = true
         Task { @MainActor in
             let saved = await finishRecording?() ?? false
-            if !saved { terminating = false }
+            if !saved {
+                terminating = false
+                let alert = NSAlert()
+                alert.messageText = "Kleio still has work to save"
+                alert.informativeText = "Quit was cancelled because recording, processing, or a backup still needs attention. Resolve the error, then quit again."
+                alert.addButton(withTitle: "Keep Open")
+                alert.runModal()
+            }
             sender.reply(toApplicationShouldTerminate: saved)
         }
         return .terminateLater

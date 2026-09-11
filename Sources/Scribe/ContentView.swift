@@ -20,6 +20,7 @@ struct ContentView: View {
         } detail: {
             detail
                 .safeAreaInset(edge: .top, spacing: 0) {
+                    DocumentJobStatusView()
                     if recording.isRecording || recording.isFinalizing || recording.hasPendingSave {
                         RecordingStatusBar()
                     }
@@ -301,7 +302,6 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
-            .background(.bar)
         }
     }
 }
@@ -821,40 +821,35 @@ struct DropOverlay: View {
 
 /// Routes a selected document to the right state view.
 struct DocumentDetailView: View {
-    @EnvironmentObject private var library: LibraryStore
-    @EnvironmentObject private var queue: TranscriptionQueue
-    @EnvironmentObject private var recording: RecordingSession
     let document: ScribeDocument
+    @State private var showSavedTranscript = false
 
     var body: some View {
-        switch document.status {
-        case .ready:
-            TranscriptView(document: document)
-        case .queued, .transcribing:
-            TranscribingView(document: document)
-        case .failed:
-            VStack(spacing: 12) {
-                ContentUnavailableView {
-                    Label("Transcription failed", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(document.failureReason ?? "Unknown error")
+        if showSavedTranscript, !document.segments.isEmpty, [.failed, .recovered].contains(document.status) {
+            VStack(spacing: 0) {
+                HStack {
+                    Label("Saved transcript", systemImage: "doc.text")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Review audio issue") { showSavedTranscript = false }
+                        .buttonStyle(.borderless)
                 }
-                Button("Try Again") { queue.enqueue(document.id) }
-                    .buttonStyle(.borderedProminent)
+                .font(.callout)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 10)
+                TranscriptView(document: document)
             }
-        case .recovered:
-            VStack(spacing: 12) {
-                ContentUnavailableView {
-                    Label("Recording recovered", systemImage: "bandage")
-                } description: {
-                    Text(document.failureReason ?? "Kleio found \(document.duration.clockString) of saved media from an interrupted recording. Review it, then transcribe the available audio.")
-                }
-                Button("Transcribe Now") { queue.enqueue(document.id) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled((recording.activeDocumentID == document.id || recording.pendingSaveDocumentID == document.id))
+        } else {
+            switch document.status {
+            case .ready:
+                TranscriptView(document: document)
+            case .queued, .transcribing:
+                TranscribingView(document: document)
+            case .failed, .recovered:
+                RecordingProblemView(document: document, onViewTranscript: { showSavedTranscript = true })
+            case .recording:
+                ActiveRecordingView()
             }
-        case .recording:
-            ActiveRecordingView()
         }
     }
 }
@@ -879,8 +874,8 @@ struct TranscribingView: View {
                     .frame(maxWidth: 520)
                     .multilineTextAlignment(.center)
             }
-            Button("Cancel") { queue.cancelCurrent() }
-                .disabled(document.status == .queued)
+            Button("Cancel") { queue.cancel(document.id) }
+
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

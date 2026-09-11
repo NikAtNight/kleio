@@ -190,9 +190,7 @@ actor SpeakerDiarizer {
             let localIntervals = validIntervals.filter { $0.end > segment.start && $0.start < segment.end }
             guard splitAtSpeakerChanges,
                   let words = segment.words, !words.isEmpty,
-                  let ranges = wordRanges(words, in: segment.text),
-                  words.allSatisfy({ $0.start.isFinite && $0.end.isFinite && $0.end >= $0.start }),
-                  zip(words, words.dropFirst()).allSatisfy({ $0.start <= $1.start }) else {
+                  TranscriptTiming.wordRanges(in: segment) != nil else {
                 var assigned = segment
                 assigned.speaker = bestSpeaker(start: segment.start, end: segment.end,
                                                intervals: localIntervals, labels: labels)
@@ -206,40 +204,13 @@ actor SpeakerDiarizer {
             for index in 1..<words.count where names[index] != names[index - 1] {
                 starts.append(index)
             }
-            return starts.enumerated().map { group, first in
-                let next = group + 1 < starts.count ? starts[group + 1] : words.count
-                let textStart = first == 0 ? segment.text.startIndex : ranges[first].lowerBound
-                let textEnd = next == words.count ? segment.text.endIndex : ranges[next].lowerBound
-                var turn = segment
-                turn.id = first == 0 ? segment.id : UUID()
-                turn.start = first == 0 ? segment.start : words[first].start
-                turn.end = next == words.count ? segment.end : words[next - 1].end
-                turn.text = String(segment.text[textStart..<textEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
-                turn.words = Array(words[first..<next])
-                turn.speaker = names[first]
+            return (TranscriptTiming.split(segment, atWordIndices: starts) ?? [segment]).enumerated().map { group, piece in
+                var turn = piece
+                turn.speaker = names[starts[group]]
                 turn.speakerID = nil
                 return turn
             }
         }
-    }
-
-    /// Do not split a corrected or partially aligned sentence. This also
-    /// preserves punctuation and scripts whose words have no spaces.
-    private nonisolated static func wordRanges(
-        _ words: [TranscriptWord], in text: String
-    ) -> [Range<String.Index>]? {
-        var cursor = text.startIndex
-        var ranges: [Range<String.Index>] = []
-        for word in words {
-            let token = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !token.isEmpty,
-                  let range = text.range(of: token, range: cursor..<text.endIndex),
-                  text[cursor..<range.lowerBound].allSatisfy(\.isWhitespace) else { return nil }
-            ranges.append(range)
-            cursor = range.upperBound
-        }
-        guard text[cursor...].allSatisfy(\.isWhitespace) else { return nil }
-        return ranges
     }
 
     private nonisolated static func bestSpeaker(
