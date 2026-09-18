@@ -52,6 +52,8 @@ while IFS= read -r bundle_name; do
 done <<< "$REFERENCED_BUNDLES"
 
 HUB_BUNDLE="$APP/Contents/Resources/swift-transformers_Hub.bundle"
+# SwiftPM writes resource bundles flat or under Contents/Resources depending on the toolchain.
+[ -d "$HUB_BUNDLE/Contents/Resources" ] && HUB_BUNDLE="$HUB_BUNDLE/Contents/Resources"
 [ -f "$HUB_BUNDLE/gpt2_tokenizer_config.json" ] || fail "Hub fallback tokenizer configuration is missing"
 [ -f "$HUB_BUNDLE/t5_tokenizer_config.json" ] || fail "Hub fallback tokenizer configuration is incomplete"
 
