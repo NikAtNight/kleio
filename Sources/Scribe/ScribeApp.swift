@@ -50,10 +50,15 @@ enum Main {
                       let resources = Bundle.main.resourceURL else {
                     throw NSError(domain: "Kleio.Package", code: 1, userInfo: [NSLocalizedDescriptionKey: "The app bundle could not be located."])
                 }
-                let hub = resources.appendingPathComponent("swift-transformers_Hub.bundle")
+                // Resolved through Bundle, as Hub does, so flat and Contents/Resources layouts both pass.
+                guard let hub = Bundle(url: resources.appendingPathComponent("swift-transformers_Hub.bundle")) else {
+                    throw NSError(domain: "Kleio.Package", code: 2, userInfo: [NSLocalizedDescriptionKey: "The Hub resource bundle could not be opened."])
+                }
                 for name in ["gpt2_tokenizer_config", "t5_tokenizer_config"] {
-                    let data = try Data(contentsOf: hub.appendingPathComponent(name + ".json"))
-                    _ = try JSONSerialization.jsonObject(with: data)
+                    guard let url = hub.url(forResource: name, withExtension: "json") else {
+                        throw NSError(domain: "Kleio.Package", code: 3, userInfo: [NSLocalizedDescriptionKey: "\(name).json is missing from the Hub bundle."])
+                    }
+                    _ = try JSONSerialization.jsonObject(with: try Data(contentsOf: url))
                 }
                 print("Packaged resources are readable from the running app.")
                 return
@@ -196,6 +201,10 @@ struct ScribeApp: App {
                         let ids = Importer.importFiles(urls, library: library, queue: queue)
                         if let first = ids.first { appState.select(document: first) }
                     }
+                    appDelegate.onCommandURL = { command in
+                        KleioURLCommandHandler(recording: recording, library: library, queue: queue,
+                                               dictation: dictation, appState: appState).handle(command)
+                    }
                     appDelegate.hasBackgroundWork = { queue.isBusy || summaries.isBusy || backups.isWorking }
                     appDelegate.recording = recording
                     appDelegate.finishRecording = {
@@ -268,6 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Set once by ScribeApp; a direct callback (not a notification) so
     /// files import exactly once no matter how many windows exist.
     var onOpenFiles: (([URL]) -> Void)?
+    var onCommandURL: ((KleioURLCommand) -> Void)?
     weak var calendarSync: CalendarSync?
     weak var autoRecordArbiter: AutoRecordArbiter?
     weak var recording: RecordingSession?
@@ -341,7 +351,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        onOpenFiles?(urls)
+        var files: [URL] = []
+        for url in urls {
+            if let command = KleioURLCommand.parse(url) {
+                onCommandURL?(command)
+            } else if url.isFileURL {
+                files.append(url)
+            }
+        }
+        if !files.isEmpty { onOpenFiles?(files) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
