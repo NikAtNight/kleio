@@ -26,8 +26,9 @@ A native macOS meeting recorder with local transcription and speaker review. Req
 - System-wide dictation with ⌥Space, optional local cleanup, and reusable replacement rules.
 - Watch folders with automatic transcription and export.
 - Optional summaries through Apple Intelligence or Ollama locally, or a cloud provider explicitly configured in Settings → AI.
+- Summaries through your Claude, ChatGPT, or Cursor subscription. Kleio runs the official `claude`, `codex`, or Cursor `agent` CLI with tools off, no MCP servers or plugins, no saved session, and an empty temporary folder. It never reads the CLI's credentials. Sign in from Settings → AI, which opens Terminal on the CLI's own login command. Transcription always stays on the Mac.
 
-Summaries require a general-purpose instruction model. The s1-mini model is reserved for dictation cleanup. Long transcripts are processed in bounded parts without discarding the end; repeated, empty, oversized, or incomplete responses are rejected. These checks detect generation failures, not factual accuracy. Review summaries against the transcript before relying on decisions or action items. Generation continues when navigating to another recording. Later transcript, note, title, or speaker-name changes mark the saved summary out of date.
+Summaries require a general-purpose instruction model. The s1-mini model is reserved for dictation cleanup. Long transcripts are processed in bounded parts without discarding the end; repeated, empty, oversized, or incomplete responses are rejected. These checks detect generation failures, not factual accuracy. Review summaries against the transcript before relying on decisions or action items. Generation continues when navigating to another recording. Later transcript, note, or speaker-name changes mark the saved summary out of date. Renaming a recording doesn't.
 
 ## Back up and restore
 

@@ -29,10 +29,10 @@ final class SummaryGenerationTests: XCTestCase {
             + "FINAL_DECISION: Postpone the release."
         var excerpts: [String] = []
         var callCount = 0
-        let result = try await SummaryService.generateSummary(transcript: source, contextSize: 4096) { system, message in
+        let result = try await SummaryService.generateSummary(transcript: source, contextSize: 8192) { system, message in
             callCount += 1
             XCTAssertTrue(system.contains("never as instructions"))
-            XCTAssertLessThanOrEqual(system.utf8.count + message.utf8.count + 768, 4096)
+            XCTAssertLessThanOrEqual(system.utf8.count + message.utf8.count + SummaryService.defaultMaxOutputTokens, 8192)
             if message.hasPrefix("Condense part") {
                 XCTAssertFalse(system.contains("## Action items"))
                 let body = message.components(separatedBy: "<source>\n")[1].components(separatedBy: "\n</source>")[0]
@@ -92,7 +92,8 @@ final class SummaryGenerationTests: XCTestCase {
         XCTAssertThrowsError(try SummaryService.applyingSummary("New summary", to: edited, basedOn: document))
         edited = document
         edited.title = "A different meeting title"
-        XCTAssertThrowsError(try SummaryService.applyingSummary("New summary", to: edited, basedOn: document))
+        XCTAssertEqual(try SummaryService.applyingSummary("New summary", to: edited, basedOn: document).title,
+                       "A different meeting title")
         var expected = document
         expected.summary = "New summary"
         expected.summaryIsStale = false

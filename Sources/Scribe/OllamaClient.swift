@@ -76,7 +76,9 @@ struct OllamaClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 45
-        configuration.timeoutIntervalForResource = 120
+        // Long summaries on larger local models can take several minutes.
+        // Each request sets its own shorter timeout.
+        configuration.timeoutIntervalForResource = 600
         return URLSession(configuration: configuration)
     }()
 
@@ -149,7 +151,8 @@ struct OllamaClient {
         temperature: Double = 0.2,
         maxTokens: Int = 2_048,
         contextSize: Int? = nil,
-        requireComplete: Bool = false
+        requireComplete: Bool = false,
+        timeout: TimeInterval = 45
     ) async throws -> String {
         let requestBody = GenerateRequest(
             model: model,
@@ -157,7 +160,7 @@ struct OllamaClient {
             prompt: prompt,
             options: .init(temperature: temperature, numPredict: maxTokens, numContext: contextSize)
         )
-        let result = try await send(requestBody)
+        let result = try await send(requestBody, timeout: timeout)
         if requireComplete, result.done != true || result.doneReason != "stop" {
             throw ClientError.incompleteResponse
         }
@@ -167,11 +170,11 @@ struct OllamaClient {
         return result.response.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func send(_ body: GenerateRequest) async throws -> GenerateResponse {
+    private func send(_ body: GenerateRequest, timeout: TimeInterval) async throws -> GenerateResponse {
         var request = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 45
+        request.timeoutInterval = timeout
         request.httpBody = try JSONEncoder().encode(body)
 
         do {
