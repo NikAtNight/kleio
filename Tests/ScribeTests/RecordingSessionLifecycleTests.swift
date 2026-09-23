@@ -4,15 +4,99 @@ import XCTest
 
 @MainActor
 final class RecordingSessionLifecycleTests: XCTestCase {
-    func testCallPromptAudioChoiceBypassesSavedVideoPreference() async throws {
-        let defaults = UserDefaults.standard
-        let previous = defaults.object(forKey: "recordingVideoEnabled")
-        defaults.set(true, forKey: "recordingVideoEnabled")
-        defer {
-            if let previous { defaults.set(previous, forKey: "recordingVideoEnabled") }
-            else { defaults.removeObject(forKey: "recordingVideoEnabled") }
+    func testEveryStartOriginAppliesSavedRecordingPreferences() async throws {
+        let zoom = RecordingApplication(bundleID: "us.zoom.xos", name: "Zoom")
+        let event = AutoRecordEvent(eventID: "event-1", title: "Planning call", start: Date(),
+                                    end: Date().addingTimeInterval(3_600), joinURL: nil)
+        struct Origin {
+            let name: String
+            let start: @MainActor (RecordingSession, LibraryStore) async -> Void
+            let application: RecordingApplication?
+            let requestsVideo: Bool
+            let origin: RecordingOrigin
         }
+        let origins = [
+            Origin(name: "toolbar, Home, menu bar or URL command",
+                   start: { await $0.startUsingPreferences(mode: .meeting, library: $1) },
+                   application: nil, requestsVideo: true, origin: .manual),
+            Origin(name: "Home app shortcut",
+                   start: { await $0.startUsingPreferences(mode: .meeting, library: $1, shortcut: zoom) },
+                   application: zoom, requestsVideo: true, origin: .manual),
+            Origin(name: "call prompt, audio only",
+                   start: { await $0.startUsingPreferences(mode: .meeting, library: $1, shortcut: zoom, videoMode: nil) },
+                   application: zoom, requestsVideo: false, origin: .manual),
+            Origin(name: "Join & Record",
+                   start: { await $0.startUsingPreferences(mode: .meeting, library: $1, calendarEvent: event) },
+                   application: nil, requestsVideo: true, origin: .manual),
+            Origin(name: "calendar auto-record",
+                   start: { await $0.startAutoRecording(for: event, library: $1, storeCalendarDetails: true) },
+                   application: nil, requestsVideo: false, origin: .autoRecord),
+        ]
+
+        for muteSync in [false, true] {
+            for origin in origins {
+                let fixture = try Fixture()
+                fixture.defaults.set("Nikhil", forKey: "microphoneSpeakerName")
+                fixture.defaults.set(3, forKey: "expectedRemoteSpeakerCount")
+                fixture.defaults.set(true, forKey: "recordingVideoEnabled")
+                fixture.defaults.set("display", forKey: "recordingVideoMode")
+                fixture.defaults.set(muteSync, forKey: "meetingMuteSyncEnabled")
+                let driver = SyntheticCaptureDriver()
+                driver.videoResult = RecordingVideoStopResult(duration: 2, startOffset: 0)
+                let session = fixture.session(driver: driver)
+                let label = "\(origin.name), mute sync \(muteSync)"
+
+                await origin.start(session, fixture.library)
+
+                if muteSync, origin.application == nil {
+                    // Unchanged: following meeting mute needs an app target, so these starts are refused.
+                    XCTAssertFalse(session.isRecording, label)
+                    XCTAssertTrue(session.lastError?.contains("app shortcut") == true, label)
+                    XCTAssertTrue(fixture.library.documents.isEmpty, label)
+                    continue
+                }
+                XCTAssertTrue(session.isRecording, label)
+                let document = try XCTUnwrap(fixture.library.document(id: XCTUnwrap(session.activeDocumentID)), label)
+                XCTAssertEqual(document.microphoneSpeakerName, "Nikhil", label)
+                XCTAssertEqual(document.expectedRemoteSpeakerCount, 3, label)
+                XCTAssertEqual(driver.muteSyncApplication, muteSync ? origin.application : nil, label)
+                XCTAssertEqual(driver.preparedVideoMode, origin.requestsVideo ? .display : nil, label)
+                XCTAssertEqual(document.videoTracks?.count, origin.requestsVideo ? 1 : nil, label)
+                XCTAssertEqual(session.activeRecording,
+                               ActiveRecording(mode: .meeting, origin: origin.origin, application: origin.application), label)
+                session.stop(library: fixture.library, queue: fixture.queue)
+                await session.waitForFinalization()
+                XCTAssertNil(session.activeRecording, label)
+            }
+        }
+    }
+
+    func testJoinAndRecordGetsTheManualAutoStop() async throws {
         let fixture = try Fixture()
+        let session = fixture.session(driver: SyntheticCaptureDriver())
+        let event = AutoRecordEvent(eventID: "event-1", title: "Planning call", start: Date(),
+                                    end: Date().addingTimeInterval(3_600), joinURL: nil)
+        await session.startUsingPreferences(mode: .meeting, library: fixture.library, calendarEvent: event)
+        XCTAssertTrue(session.isRecording)
+        XCTAssertEqual(session.activeCalendarEventTitle, "Planning call")
+
+        var core = ManualAutoStopCore()
+        let start = Date()
+        func update(after seconds: TimeInterval) -> [ManualAutoStopCommand] {
+            core.update(now: start.addingTimeInterval(seconds), enabled: true, recording: session.activeRecording,
+                        isPaused: false, elapsed: seconds, conferencingProcessBundleIDs: [],
+                        systemAudioActive: false, micAudioActive: false, silenceMinutes: 3)
+        }
+        XCTAssertEqual(update(after: 0), [])
+        XCTAssertEqual(update(after: 179), [])
+        XCTAssertEqual(update(after: 180), [.stopRecording])
+        session.stop(library: fixture.library, queue: fixture.queue)
+        await session.waitForFinalization()
+    }
+
+    func testCallPromptAudioChoiceBypassesSavedVideoPreference() async throws {
+        let fixture = try Fixture()
+        fixture.defaults.set(true, forKey: "recordingVideoEnabled")
         let driver = SyntheticCaptureDriver()
         let session = fixture.session(driver: driver)
         let app = RecordingApplication(bundleID: "test.call", name: "Test call")
@@ -389,16 +473,20 @@ private final class Fixture {
     let root: URL
     let library: LibraryStore
     let queue = TranscriptionQueue()
+    let defaultsSuite = "RecordingSessionLifecycleTests-\(UUID().uuidString)"
+    let defaults: UserDefaults
     var enqueued: [UUID] = []
 
     init() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("RecordingSessionLifecycleTests-\(UUID().uuidString)", isDirectory: true)
         library = LibraryStore(baseURL: root)
+        defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
     }
 
     deinit {
         try? FileManager.default.removeItem(at: root)
+        defaults.removePersistentDomain(forName: defaultsSuite)
     }
 
     func session(driver: SyntheticCaptureDriver) -> RecordingSession {
@@ -408,7 +496,7 @@ private final class Fixture {
             audioDuration: { [weak driver] _ in driver?.audioDuration ?? 0 },
             enqueue: { [weak self] _, id in self?.enqueued.append(id) },
             resolveApplication: { _ in [123] }
-        ))
+        ), defaults: defaults)
     }
 
     func blockManifest(for id: UUID) throws -> (blocker: URL, original: URL) {

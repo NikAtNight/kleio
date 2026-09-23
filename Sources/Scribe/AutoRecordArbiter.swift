@@ -65,7 +65,6 @@ enum ManualAutoStopCommand: Equatable {
 }
 
 struct ManualAutoStopCore {
-    private var trackedProcessBundleID: String?
     private var silenceSince: Date?
     private var pausedAt: Date?
     private var didRequestStop = false
@@ -73,7 +72,7 @@ struct ManualAutoStopCore {
     mutating func update(
         now: Date,
         enabled: Bool,
-        isManualMeetingRecording: Bool,
+        recording: ActiveRecording?,
         isPaused: Bool,
         elapsed: TimeInterval,
         conferencingProcessBundleIDs: Set<String>,
@@ -81,7 +80,9 @@ struct ManualAutoStopCore {
         micAudioActive: Bool,
         silenceMinutes: Int
     ) -> [ManualAutoStopCommand] {
-        guard enabled, isManualMeetingRecording else {
+        // Auto-record stops the recordings it started. Every other meeting recording,
+        // including Join & Record, follows these rules.
+        guard enabled, let recording, recording.mode == .meeting, recording.origin == .manual else {
             reset()
             return []
         }
@@ -97,10 +98,6 @@ struct ManualAutoStopCore {
             self.pausedAt = nil
         }
 
-        if trackedProcessBundleID == nil {
-            trackedProcessBundleID = conferencingProcessBundleIDs.sorted().first
-        }
-
         if !systemAudioActive && !micAudioActive {
             if silenceSince == nil { silenceSince = now }
         } else {
@@ -109,8 +106,11 @@ struct ManualAutoStopCore {
 
         guard elapsed >= 2 * 60, !didRequestStop else { return [] }
 
-        if let trackedProcessBundleID,
-           !conferencingProcessBundleIDs.contains(trackedProcessBundleID) {
+        // Only the recorded app quitting ends the call. A browser or all-Mac-audio
+        // recording has no app that quits with the call, so it relies on silence.
+        if let bundleID = recording.application?.bundleID,
+           AudioProcessMonitor.isCallApp(bundleID),
+           !conferencingProcessBundleIDs.contains(bundleID) {
             didRequestStop = true
             return [.stopRecording]
         }
@@ -124,7 +124,6 @@ struct ManualAutoStopCore {
     }
 
     private mutating func reset() {
-        trackedProcessBundleID = nil
         silenceSince = nil
         pausedAt = nil
         didRequestStop = false
@@ -147,7 +146,8 @@ struct AutoRecordArbiterCore {
         processRunning: Bool,
         systemAudioActive: Bool,
         micAudioActive: Bool,
-        recordingActive: Bool
+        recordingActive: Bool,
+        startBlocked: Bool
     ) -> [AutoRecordCommand] {
         guard configuration.enabled else {
             return disableCurrentState(recordingActive: recordingActive)
@@ -196,6 +196,14 @@ struct AutoRecordArbiterCore {
                 return []
             }
             guard now >= deadline else { return [] }
+            // Dictation or a backup holds the countdown open. Give up only once the meeting is over.
+            if startBlocked {
+                if now > event.end {
+                    cancelledEventIDs.insert(event.eventID)
+                    phase = .idle
+                }
+                return []
+            }
             phase = .recording(event)
             silenceSince = nil
             return [.startRecording(event)]
@@ -358,6 +366,7 @@ final class AutoRecordArbiter: ObservableObject {
 
     @Published private(set) var phase: AutoRecordPhase = .idle
     @Published private(set) var lastProblem: String?
+    nonisolated private static let audioLevelThreshold: Float = 0.04
 
     private var core = AutoRecordArbiterCore()
     private var manualAutoStopCore = ManualAutoStopCore()
@@ -371,15 +380,19 @@ final class AutoRecordArbiter: ObservableObject {
     private var notifiedPermissionFailure = false
     private var isConfigured = false
     private var startInProgress = false
+    private var startBlocked: () -> Bool = { true }
+    private var loggedStartWait = false
 
     func configure(
         calendarSync: CalendarSync,
         recording: RecordingSession,
         library: LibraryStore,
-        queue: TranscriptionQueue
+        queue: TranscriptionQueue,
+        startBlocked: @escaping () -> Bool
     ) {
         guard !isConfigured else { return }
         isConfigured = true
+        self.startBlocked = startBlocked
         self.calendarSync = calendarSync
         self.recording = recording
         self.library = library
@@ -403,6 +416,8 @@ final class AutoRecordArbiter: ObservableObject {
         case Self.cancelActionIdentifier:
             run(core.cancel(eventID: userInfo["eventID"] as? String))
         case Self.startNowActionIdentifier:
+            // A blocked start keeps its countdown; the first unblocked tick starts it.
+            guard !startBlocked() else { break }
             run(core.startNow())
         case Self.stopAndSwitchActionIdentifier:
             guard let eventID = userInfo["eventID"] as? String,
@@ -426,26 +441,39 @@ final class AutoRecordArbiter: ObservableObject {
         }
         let currentEvent = core.phase.event
         let processRunning = currentEvent.map(processMonitor.hasConferencingProcess) ?? false
+        let activeRecording = recording.isRecording ? recording.activeRecording : nil
+        let recordingSystemActive = recording.systemLevel > Self.audioLevelThreshold
+        let recordingMicActive = recording.micLevel > Self.audioLevelThreshold
+        let startBlocked = startBlocked()
         let commands = core.update(
             now: now,
             meetings: calendarSync.autoRecordMeetings(at: now),
             configuration: calendarSync.autoRecordConfiguration,
             processRunning: processRunning,
-            systemAudioActive: systemAudioActive || recording.systemLevel > 0.04,
-            micAudioActive: recording.micLevel > 0.04,
-            recordingActive: recording.isRecording
+            systemAudioActive: systemAudioActive || recordingSystemActive,
+            micAudioActive: recordingMicActive,
+            recordingActive: activeRecording?.origin == .autoRecord,
+            startBlocked: startBlocked
         )
         let manualCommands = manualAutoStopCore.update(
             now: now,
             enabled: UserDefaults.standard.bool(forKey: "manualAutoStopEnabled"),
-            isManualMeetingRecording: isManualMeetingRecording(recording),
+            recording: activeRecording,
             isPaused: recording.isPaused,
             elapsed: recording.elapsed,
-            conferencingProcessBundleIDs: processMonitor.runningConferencingProcessBundleIDs(),
-            systemAudioActive: recording.systemLevel > 0.04,
-            micAudioActive: recording.micLevel > 0.04,
+            conferencingProcessBundleIDs: processMonitor.runningCallAppBundleIDs(),
+            systemAudioActive: recordingSystemActive,
+            micAudioActive: recordingMicActive,
             silenceMinutes: calendarSync.autoRecordSilenceMinutes
         )
+        if startBlocked, case .countdown(let event, let deadline) = core.phase, now >= deadline {
+            if !loggedStartWait {
+                loggedStartWait = true
+                DiagLog.log("auto-record waiting to start %@ until dictation or a backup finishes", event.eventID)
+            }
+        } else {
+            loggedStartWait = false
+        }
         phase = core.phase
         run(commands)
         run(manualCommands)
@@ -457,7 +485,7 @@ final class AutoRecordArbiter: ObservableObject {
             case .startMetering:
                 do {
                     try processMonitor.startMetering { [weak self] level in
-                        Task { @MainActor in self?.systemAudioActive = level > 0.04 }
+                        Task { @MainActor in self?.systemAudioActive = level > Self.audioLevelThreshold }
                     }
                 } catch {
                     lastProblem = error.localizedDescription
@@ -472,7 +500,8 @@ final class AutoRecordArbiter: ObservableObject {
             case .startRecording(let event):
                 startRecording(for: event)
             case .stopRecording:
-                guard let recording, let library, let queue, recording.isRecording else { continue }
+                guard let recording, let library, let queue, recording.isRecording,
+                      recording.activeRecording?.origin == .autoRecord else { continue }
                 recording.stop(library: library, queue: queue)
             case .postOverlap(let active, let waiting):
                 postOverlap(active: active, waiting: waiting)
@@ -492,14 +521,6 @@ final class AutoRecordArbiter: ObservableObject {
         }
     }
 
-    private func isManualMeetingRecording(_ recording: RecordingSession) -> Bool {
-        guard recording.isRecording, recording.activeCalendarEventTitle == nil,
-              let documentID = recording.activeDocumentID,
-              let document = library?.document(id: documentID) else { return false }
-        let sources = Set(document.tracks.map(\.source))
-        return sources.contains(.microphone) && sources.contains(.system)
-    }
-
     private func startRecording(for event: AutoRecordEvent) {
         guard let recording, let library else { return }
         guard !recording.isRecording else {
@@ -510,12 +531,10 @@ final class AutoRecordArbiter: ObservableObject {
         }
         startInProgress = true
         Task {
-            await recording.start(
-                mode: .meeting,
+            await recording.startAutoRecording(
+                for: event,
                 library: library,
-                calendarEvent: event,
-                storeCalendarDetails: calendarSync?.storesAutoRecordEventDetails ?? true,
-                meetingMuteSyncEnabled: UserDefaults.standard.bool(forKey: "meetingMuteSyncEnabled")
+                storeCalendarDetails: calendarSync?.storesAutoRecordEventDetails ?? true
             )
             startInProgress = false
             if !recording.isRecording {

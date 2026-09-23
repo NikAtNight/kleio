@@ -12,12 +12,26 @@ final class AudioProcessMonitor {
         "Cisco-Systems.Spark",
     ]
 
+    /// Apps a recording can target whose quitting ends the call. Slack is left out of
+    /// the auto-record signal above because it usually stays open all day.
+    nonisolated private static let callAppBundleIDs = nativeConferenceBundleIDs.union(["com.tinyspeck.slackmacgap"])
+
     nonisolated private static let browserBundleIDs: Set<String> = [
         "com.apple.Safari",
+        "com.apple.SafariTechnologyPreview",
         "com.google.Chrome",
+        "com.google.Chrome.beta",
+        "com.google.Chrome.canary",
+        "org.chromium.Chromium",
         "company.thebrowser.Browser",
         "com.microsoft.edgemac",
+        "com.microsoft.edgemac.Beta",
         "org.mozilla.firefox",
+        "org.mozilla.firefoxdeveloperedition",
+        "app.zen-browser.zen",
+        "com.brave.Browser",
+        "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera",
     ]
 
     private var meteringTap: SystemAudioTap?
@@ -27,9 +41,8 @@ final class AudioProcessMonitor {
         return Self.hasConferencingProcess(runningBundleIDs: runningBundleIDs, joinURL: event.joinURL)
     }
 
-    func runningConferencingProcessBundleIDs() -> Set<String> {
-        let runningBundleIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
-        return Self.conferencingProcessBundleIDs(in: runningBundleIDs)
+    func runningCallAppBundleIDs() -> Set<String> {
+        Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)).intersection(Self.callAppBundleIDs)
     }
 
     nonisolated static func hasConferencingProcess(runningBundleIDs: Set<String>, joinURL: URL?) -> Bool {
@@ -42,6 +55,10 @@ final class AudioProcessMonitor {
 
     nonisolated static func conferencingProcessBundleIDs(in runningBundleIDs: Set<String>) -> Set<String> {
         runningBundleIDs.intersection(nativeConferenceBundleIDs)
+    }
+
+    nonisolated static func isCallApp(_ bundleID: String) -> Bool {
+        callAppBundleIDs.contains(bundleID)
     }
 
     func startMetering(onLevel: @escaping @Sendable (Float) -> Void) throws {

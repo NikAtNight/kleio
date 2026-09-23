@@ -47,6 +47,13 @@ enum DiagLog {
         }
     }
 
+    /// For opt-in diagnostics that can name people or channels, such as call control labels.
+    /// These go to diagnostics.log only, never the system log.
+    static func logToFileOnly(_ message: String) {
+        _ = sessionStarted
+        queue.async { write(message) }
+    }
+
     private static func write(_ message: String) {
         try? FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
         let line = "\(stamp.string(from: Date())) \(message)\n"

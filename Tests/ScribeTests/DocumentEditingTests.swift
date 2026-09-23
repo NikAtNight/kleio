@@ -151,6 +151,214 @@ final class DocumentEditingTests: XCTestCase {
     }
 
     @MainActor
+    func testRenameSpeakerSavesNewPersonAndDocumentTogether() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let peopleDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: peopleDirectory) }
+        var document = speakerDocument()
+        document.normalizeSpeakerIdentities()
+        let remoteID = try XCTUnwrap(document.segments[1].speakerID)
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+        let savedPeople = SavedPeopleStore(directory: peopleDirectory)
+
+        XCTAssertTrue(try DocumentEditing.renameSpeaker(
+            remoteID, to: "Jordan", savedPersonID: nil, savePerson: true,
+            documentID: document.id, library: library, savedPeople: savedPeople,
+            undoManager: nil, actionName: "Rename speaker", onUndoFailure: { XCTFail($0) }
+        ))
+
+        XCTAssertEqual(savedPeople.people.map(\.name), ["Jordan"])
+        let updated = try XCTUnwrap(library.document(id: document.id))
+        XCTAssertEqual(updated.speakerName(for: updated.segments[1]), "Jordan")
+        XCTAssertEqual(updated.speakers?.first { $0.id == remoteID }?.savedPersonID, savedPeople.people.first?.id)
+    }
+
+    @MainActor
+    func testRenameSpeakerFailureRemovesOnlyTheSavedPersonItCreated() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let peopleDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: peopleDirectory) }
+        var document = speakerDocument()
+        document.normalizeSpeakerIdentities()
+        let remoteID = try XCTUnwrap(document.segments[1].speakerID)
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+        let savedPeople = SavedPeopleStore(directory: peopleDirectory)
+        let existingPerson = try savedPeople.add(name: "Alex")
+
+        let backup = try blockManifest(for: document.id, in: library, suffix: "rename-new")
+        XCTAssertThrowsError(try DocumentEditing.renameSpeaker(
+            remoteID, to: "Jordan", savedPersonID: nil, savePerson: true,
+            documentID: document.id, library: library, savedPeople: savedPeople,
+            undoManager: nil, actionName: "Rename speaker", onUndoFailure: { _ in XCTFail("no undo should register") }
+        ))
+        XCTAssertEqual(savedPeople.people, [existingPerson])
+
+        // Reusing an already-saved person for the rename must not remove it
+        // when the same Recording save still fails.
+        XCTAssertThrowsError(try DocumentEditing.renameSpeaker(
+            remoteID, to: existingPerson.name, savedPersonID: nil, savePerson: true,
+            documentID: document.id, library: library, savedPeople: savedPeople,
+            undoManager: nil, actionName: "Rename speaker", onUndoFailure: { _ in XCTFail("no undo should register") }
+        ))
+        XCTAssertEqual(savedPeople.people, [existingPerson])
+
+        try unblockManifest(for: document.id, in: library, backup: backup)
+        XCTAssertEqual(library.document(id: document.id)?.speakerName(for: library.document(id: document.id)!.segments[1]), "Speaker 1")
+    }
+
+    @MainActor
+    func testRenameSpeakerUnavailableWritesNothing() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let peopleDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: peopleDirectory) }
+        var document = speakerDocument()
+        document.normalizeSpeakerIdentities()
+        let microphoneID = try XCTUnwrap(document.segments[0].speakerID)
+        let remoteID = try XCTUnwrap(document.segments[1].speakerID)
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+        let savedPeople = SavedPeopleStore(directory: peopleDirectory)
+
+        // The microphone speaker can never be renamed.
+        XCTAssertThrowsError(try DocumentEditing.renameSpeaker(
+            microphoneID, to: "Someone else", savedPersonID: nil, savePerson: true,
+            documentID: document.id, library: library, savedPeople: savedPeople,
+            undoManager: nil, actionName: "Rename speaker", onUndoFailure: { _ in XCTFail("no undo should register") }
+        ))
+        XCTAssertTrue(savedPeople.people.isEmpty)
+
+        // Speaker analysis still running blocks every speaker, not only the microphone.
+        var running = document
+        running.speakerAnalysisStatus = .running
+        XCTAssertTrue(library.update(running))
+        XCTAssertThrowsError(try DocumentEditing.renameSpeaker(
+            remoteID, to: "Jordan", savedPersonID: nil, savePerson: true,
+            documentID: document.id, library: library, savedPeople: savedPeople,
+            undoManager: nil, actionName: "Rename speaker", onUndoFailure: { _ in XCTFail("no undo should register") }
+        ))
+        XCTAssertTrue(savedPeople.people.isEmpty)
+        XCTAssertEqual(library.document(id: document.id)?.speakerAnalysisStatus, .running)
+    }
+
+    @MainActor
+    func testNormalizeSpeakerIdentitiesOnOpenSavesOnlyWhenSomethingChangedAndReportsFailure() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = ScribeDocument(
+            title: "Old meeting",
+            kind: .recording,
+            status: .ready,
+            segments: [TranscriptSegment(start: 0, end: 1, text: "Hi", source: .system, speaker: "Speaker 1")]
+        )
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+        XCTAssertNil(library.document(id: document.id)?.speakers)
+
+        XCTAssertTrue(try DocumentEditing.normalizeSpeakerIdentitiesOnOpen(documentID: document.id, library: library))
+        XCTAssertNotNil(library.document(id: document.id)?.speakers)
+
+        // Already normalized: no save is attempted even though the manifest
+        // write is blocked, proving the "did anything change" check works.
+        let backup = try blockManifest(for: document.id, in: library, suffix: "normalize-noop")
+        XCTAssertFalse(try DocumentEditing.normalizeSpeakerIdentitiesOnOpen(documentID: document.id, library: library))
+        try unblockManifest(for: document.id, in: library, backup: backup)
+
+        // Force a real change and confirm a save failure is reported rather than silently dropped.
+        var stale = try XCTUnwrap(library.document(id: document.id))
+        stale.knownSpeakers = (stale.knownSpeakers ?? []) + ["Newly Known Speaker"]
+        XCTAssertTrue(library.update(stale))
+        let secondBackup = try blockManifest(for: document.id, in: library, suffix: "normalize-fail")
+        XCTAssertThrowsError(try DocumentEditing.normalizeSpeakerIdentitiesOnOpen(documentID: document.id, library: library))
+        try unblockManifest(for: document.id, in: library, backup: secondBackup)
+    }
+
+    @MainActor
+    func testCommitSegmentEditSuggestsOneToThreeCorrectionsWithMatchingWordCounts() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = textDocument("I pushed the change to talex today")
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+
+        let suggestions = try XCTUnwrap(try DocumentEditing.commitSegmentEdit(
+            "I pushed the change to Talix today", segmentID: document.segments[0].id,
+            documentID: document.id, library: library, existingRules: []
+        ))
+        XCTAssertEqual(suggestions.map(\.wrong), ["talex"])
+        XCTAssertEqual(suggestions.map(\.right), ["Talix"])
+    }
+
+    @MainActor
+    func testCommitSegmentEditRejectsFourOrMoreCorrections() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = textDocument("wombat foxtrot yonder zephyr")
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+
+        let suggestions = try DocumentEditing.commitSegmentEdit(
+            "walrus foxglove yosemite zeppelin", segmentID: document.segments[0].id,
+            documentID: document.id, library: library, existingRules: []
+        )
+        XCTAssertNil(suggestions)
+    }
+
+    @MainActor
+    func testCommitSegmentEditRejectsUnequalWordCounts() throws {
+        // "get hub" collapsing into "github" is a real correction DictationDiff
+        // reports, but the view has always rejected unequal word counts. This
+        // pins that existing behavior rather than changing it.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = textDocument("deploy kubernets from get hub actions")
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+
+        let suggestions = try DocumentEditing.commitSegmentEdit(
+            "deploy kubernetes from github actions", segmentID: document.segments[0].id,
+            documentID: document.id, library: library, existingRules: []
+        )
+        XCTAssertNil(suggestions)
+    }
+
+    @MainActor
+    func testCommitSegmentEditFiltersCorrectionsThatMatchAnExistingReplacementRule() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = textDocument("I pushed the change to talex today")
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+        let rule = TextReplacement(original: "talex", replacement: "Talix")
+
+        let suggestions = try XCTUnwrap(try DocumentEditing.commitSegmentEdit(
+            "I pushed the change to Talix today", segmentID: document.segments[0].id,
+            documentID: document.id, library: library, existingRules: [rule]
+        ))
+        XCTAssertTrue(suggestions.isEmpty)
+    }
+
+    @MainActor
+    func testCommitSegmentEditThrowsAndSuggestsNothingWhenSaveFails() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = textDocument("I pushed the change to talex today")
+        let library = LibraryStore(baseURL: root)
+        XCTAssertTrue(library.update(document))
+
+        let backup = try blockManifest(for: document.id, in: library, suffix: "commit-edit")
+        XCTAssertThrowsError(try DocumentEditing.commitSegmentEdit(
+            "I pushed the change to Talix today", segmentID: document.segments[0].id,
+            documentID: document.id, library: library, existingRules: []
+        ))
+        try unblockManifest(for: document.id, in: library, backup: backup)
+    }
+
+    @MainActor
     private func blockManifest(
         for documentID: UUID, in library: LibraryStore, suffix: String
     ) throws -> URL {
@@ -174,6 +382,15 @@ final class DocumentEditingTests: XCTestCase {
         await withCheckedContinuation { continuation in
             DispatchQueue.main.async { continuation.resume() }
         }
+    }
+
+    private func textDocument(_ text: String) -> ScribeDocument {
+        ScribeDocument(
+            title: "Segment fixture",
+            kind: .recording,
+            status: .ready,
+            segments: [TranscriptSegment(start: 0, end: 1, text: text)]
+        )
     }
 
     private func speakerDocument() -> ScribeDocument {

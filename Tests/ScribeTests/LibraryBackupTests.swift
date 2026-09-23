@@ -207,4 +207,23 @@ extension LibraryBackupTests {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: target.appendingPathComponent("Backups"), includingPropertiesForKeys: nil).count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: target.appendingPathComponent("library/\(doc.id.uuidString)/document.json").path))
     }
+
+    func testEveryPreferenceKeyIsBackedUpOrDeliberatelyExcluded() throws {
+        // Credentials and diagnostics stay out of backups on purpose.
+        let excluded: Set<String> = ["aiAPIKey", "callDetectionDebug"]
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Scribe")
+        let pattern = try NSRegularExpression(pattern: #"(?:@AppStorage\(|forKey: )"([A-Za-z0-9.]+)""#)
+        var keys = Set<String>()
+        for file in try FileManager.default.contentsOfDirectory(at: sources, includingPropertiesForKeys: nil)
+        where file.pathExtension == "swift" {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            for match in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                keys.insert(String(text[Range(match.range(at: 1), in: text)!]))
+            }
+        }
+        XCTAssertGreaterThan(keys.count, 20)
+        XCTAssertEqual(keys.subtracting(LibraryBackup.preferenceKeys).subtracting(excluded), [])
+    }
 }

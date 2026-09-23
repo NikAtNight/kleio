@@ -58,7 +58,7 @@ struct MeetingDetailView: View {
                 Task {
                     // Passing the event names the recording after the meeting
                     // and links it for attendee speaker suggestions.
-                    await recording.start(
+                    await recording.startUsingPreferences(
                         mode: .meeting,
                         library: library,
                         calendarEvent: AutoRecordEvent(
@@ -67,8 +67,7 @@ struct MeetingDetailView: View {
                             start: meeting.start,
                             end: meeting.end,
                             joinURL: meeting.joinURL
-                        ),
-                        meetingMuteSyncEnabled: UserDefaults.standard.bool(forKey: "meetingMuteSyncEnabled")
+                        )
                     )
                 }
             } label: {

@@ -8,6 +8,9 @@ import UniformTypeIdentifiers
 enum Importer {
     static let supportedTypes: [UTType] = [.audio, .movie, .mpeg4Movie, .quickTimeMovie, .mp3, .wav, .aiff, .mpeg4Audio]
 
+    /// Overridable so tests can predict the id of a document before it is created.
+    static var makeID: () -> UUID = { UUID() }
+
     static func isSupported(_ url: URL) -> Bool {
         guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else { return false }
         return type.conforms(to: .audio) || type.conforms(to: .audiovisualContent)
@@ -25,6 +28,7 @@ enum Importer {
         var ids: [UUID] = []
         for url in urls where isSupported(url) {
             var doc = ScribeDocument(
+                id: makeID(),
                 title: url.deletingPathExtension().lastPathComponent,
                 kind: .imported,
                 status: .queued
@@ -32,7 +36,7 @@ enum Importer {
             doc.originalFilePath = url.path
             doc.automaticExportDirectory = automaticExportDirectory?.path
             doc.automaticExportFormats = automaticExportFormats.map(\.rawValue)
-            let folder = LibraryStore.folder(for: doc.id)
+            let folder = library.folder(for: doc.id)
             let fileName = "audio.\(url.pathExtension.lowercased())"
             let accessed = url.startAccessingSecurityScopedResource()
             defer { if accessed { url.stopAccessingSecurityScopedResource() } }
@@ -41,11 +45,16 @@ enum Importer {
                 try FileManager.default.copyItem(at: url, to: folder.appendingPathComponent(fileName))
             } catch {
                 DiagLog.log("import copy failed for %@ file: %@", url.pathExtension.lowercased(), error.localizedDescription)
+                try? FileManager.default.removeItem(at: folder)
                 continue
             }
             doc.tracks = [AudioTrack(source: .imported, fileName: fileName)]
             doc.duration = audioDuration(of: folder.appendingPathComponent(fileName))
-            library.add(doc)
+            guard library.add(doc) else {
+                DiagLog.log("import save failed for %@ file", url.pathExtension.lowercased())
+                try? FileManager.default.removeItem(at: folder)
+                continue
+            }
             queue.enqueue(doc.id)
             ids.append(doc.id)
         }
@@ -67,8 +76,8 @@ enum Importer {
         let title = parentNames.count == 1
             ? (parentNames.first ?? "Podcast")
             : "Podcast, \(Date().formatted(date: .abbreviated, time: .shortened))"
-        var doc = ScribeDocument(title: title, kind: .imported, status: .queued)
-        let folder = LibraryStore.folder(for: doc.id)
+        var doc = ScribeDocument(id: makeID(), title: title, kind: .imported, status: .queued)
+        let folder = library.folder(for: doc.id)
         var usedNames: [String: Int] = [:]
 
         do {
@@ -96,7 +105,11 @@ enum Importer {
         doc.duration = doc.tracks
             .map { audioDuration(of: folder.appendingPathComponent($0.fileName)) }
             .max() ?? 0
-        library.add(doc)
+        guard library.add(doc) else {
+            DiagLog.log("podcast import save failed for %d tracks", supported.count)
+            try? FileManager.default.removeItem(at: folder)
+            return nil
+        }
         queue.enqueue(doc.id)
         return doc.id
     }

@@ -121,6 +121,16 @@ final class DictationController: ObservableObject {
         lastMessage = "Dictation cancelled"
     }
 
+    /// Quit drops a take that's still listening and gives a running transcription
+    /// time to finish and paste. After the timeout, quit goes ahead without it.
+    func prepareToQuit(timeout: TimeInterval = 15) async {
+        if phase == .preparing || phase == .recording { cancelRecording() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while phase == .transcribing, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
     private func startRecording() {
         guard recordingSession?.isBusy != true else {
             lastMessage = "Finish the active recording before starting dictation"

@@ -7,7 +7,7 @@ enum LibraryBackup {
     static let preferenceKeys: Set<String> = [
         "language", "translate", "selectedModel", "microphoneSpeakerName", "expectedRemoteSpeakerCount",
         "preferredInputDeviceUID", "automaticSpeakerRecognition", "speakerDetectionModel", "voiceRecognitionEnabled",
-        "manualAutoStopEnabled", "recordingAppShortcuts", "recordingVideoEnabled", "recordingVideoMode",
+        "manualAutoStopEnabled", "meetingMuteSyncEnabled", "callDetectionEnabled", "recordingAppShortcuts", "recordingVideoEnabled", "recordingVideoMode",
         "textReplacementRules", "replacementCaseSensitive", "replacementWholeWords", "removeFillerWords",
         "dictationEnabled", "dictationCleanupEnabled", "dictationCleanupBackend", "dictationCleanupOllamaModel",
         "aiProvider", "aiModel", "aiOllamaModel", "aiModel.claudeCode", "aiModel.codex", "aiModel.cursor", "summaryPrompt", "watchAutoTranscribe", "watchAutoExport",

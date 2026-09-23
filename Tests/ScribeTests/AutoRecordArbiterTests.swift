@@ -83,6 +83,40 @@ final class AutoRecordArbiterTests: XCTestCase {
         XCTAssertEqual(core.phase, .recording(meeting))
     }
 
+    func testCountdownWaitsWhileDictationOrBackupBlocksThenStarts() {
+        var core = AutoRecordArbiterCore()
+        let meeting = event()
+        let deadline = advanceToCountdown(&core, event: meeting).addingTimeInterval(configuration.countdownSeconds)
+
+        for offset in [0.0, 60, 600] {
+            XCTAssertEqual(
+                update(&core, at: deadline.addingTimeInterval(offset), meetings: [meeting], process: true, system: true, blocked: true),
+                []
+            )
+            XCTAssertEqual(core.phase, .countdown(meeting, deadline: deadline))
+        }
+        XCTAssertEqual(
+            update(&core, at: deadline.addingTimeInterval(601), meetings: [meeting], process: true, system: true),
+            [.startRecording(meeting)]
+        )
+        XCTAssertEqual(core.phase, .recording(meeting))
+    }
+
+    func testBlockedCountdownGivesUpAfterTheMeetingEnds() {
+        var core = AutoRecordArbiterCore()
+        let meeting = event(duration: 600)
+        advanceToCountdown(&core, event: meeting)
+
+        XCTAssertEqual(
+            update(&core, at: meeting.end.addingTimeInterval(1), meetings: [meeting], process: true, blocked: true),
+            []
+        )
+        XCTAssertEqual(core.phase, .idle)
+        // The meeting is still inside its late-join window, but it must not count down again.
+        _ = update(&core, at: meeting.end.addingTimeInterval(2), meetings: [meeting], process: true, system: true)
+        XCTAssertEqual(core.phase, .idle)
+    }
+
     func testStartNowSkipsCountdownWait() {
         var core = AutoRecordArbiterCore()
         let meeting = event()
@@ -257,6 +291,11 @@ final class AutoRecordArbiterTests: XCTestCase {
             runningBundleIDs: ["com.apple.Safari"],
             joinURL: URL(string: "https://zoom.us/j/123")
         ))
+        // Slack usually stays open all day, so it isn't evidence of a scheduled meeting.
+        XCTAssertFalse(AudioProcessMonitor.hasConferencingProcess(
+            runningBundleIDs: ["com.tinyspeck.slackmacgap"],
+            joinURL: URL(string: "https://zoom.us/j/123")
+        ))
     }
 
     func testOlderDocumentDecodesWithoutCalendarMetadata() throws {
@@ -289,7 +328,8 @@ final class AutoRecordArbiterTests: XCTestCase {
         process: Bool = false,
         system: Bool = false,
         mic: Bool = false,
-        recording: Bool = false
+        recording: Bool = false,
+        blocked: Bool = false
     ) -> [AutoRecordCommand] {
         core.update(
             now: date,
@@ -298,7 +338,8 @@ final class AutoRecordArbiterTests: XCTestCase {
             processRunning: process,
             systemAudioActive: system,
             micAudioActive: mic,
-            recordingActive: recording
+            recordingActive: recording,
+            startBlocked: blocked
         )
     }
 }

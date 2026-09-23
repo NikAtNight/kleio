@@ -132,6 +132,101 @@ enum DocumentEditing {
         return saved
     }
 
+    /// Renames a speaker, optionally saving them as a person first. The
+    /// availability check, the saved-person write, the Recording edit, and
+    /// undo registration all happen behind this one call, so a failed
+    /// Recording save cannot leave an orphaned saved person behind. A saved
+    /// person this call did not create (an existing pick, or a
+    /// case-insensitive name match inside `SavedPeopleStore.add`) is never
+    /// removed.
+    @discardableResult
+    static func renameSpeaker(
+        _ speakerID: UUID,
+        to name: String,
+        savedPersonID: UUID?,
+        savePerson: Bool,
+        documentID: UUID,
+        library: LibraryStore,
+        savedPeople: SavedPeopleStore,
+        undoManager: UndoManager?,
+        actionName: String,
+        onUndoFailure: @escaping (String) -> Void
+    ) throws -> Bool {
+        guard let document = library.document(id: documentID) else { throw Failure.unavailable }
+        guard document.speakerAnalysisStatus != .running,
+              document.speakers?.contains(where: { $0.id == speakerID && !$0.isMicrophone }) == true
+        else { throw Failure.speakerUnavailable }
+
+        var personID = savedPersonID
+        var createdPersonID: UUID?
+        if savePerson {
+            let existingIDs = Set(savedPeople.people.map(\.id))
+            let person = try savedPeople.add(name: name)
+            personID = person.id
+            if !existingIDs.contains(person.id) { createdPersonID = person.id }
+        }
+
+        do {
+            return try applySpeakerEdit(
+                documentID: documentID,
+                library: library,
+                undoManager: undoManager,
+                actionName: actionName,
+                onUndoFailure: onUndoFailure,
+                change: { $0.renameSpeaker(id: speakerID, to: name, savedPersonID: personID) }
+            )
+        } catch {
+            if let createdPersonID {
+                try? savedPeople.remove(id: createdPersonID)
+            }
+            throw error
+        }
+    }
+
+    /// Runs speaker-identity normalization on the latest document and saves
+    /// it only when normalization actually changed something. Intended for
+    /// opening a document, where a save failure is background housekeeping
+    /// rather than the result of a user action.
+    @discardableResult
+    static func normalizeSpeakerIdentitiesOnOpen(documentID: UUID, library: LibraryStore) throws -> Bool {
+        try persist(documentID: documentID, library: library) { document in
+            document.normalizeSpeakerIdentities()
+            return true
+        }
+    }
+
+    /// Saves edited segment text and returns the dictation corrections
+    /// eligible to suggest to the user, or nil when the current suggestions
+    /// should be left alone (the text did not change, there weren't 1-3
+    /// corrections, or the edit changed the word count).
+    ///
+    /// The existing-rule comparison duplicates
+    /// `ReplacementStore.addRule(original:replacement:)`, which is not
+    /// reachable from here without changing a file this change does not own.
+    static func commitSegmentEdit(
+        _ text: String,
+        segmentID: UUID,
+        documentID: UUID,
+        library: LibraryStore,
+        existingRules: [TextReplacement]
+    ) throws -> [(wrong: String, right: String)]? {
+        guard let oldText = try updateSegmentText(
+            text, segmentID: segmentID, documentID: documentID, library: library
+        ) else { return nil }
+        let corrections = DictationDiff.proposedCorrections(original: oldText, edited: text)
+        guard (1...3).contains(corrections.count),
+              oldText.split(whereSeparator: { $0.isWhitespace }).count
+                == text.split(whereSeparator: { $0.isWhitespace }).count else { return nil }
+        return corrections.filter { correction in
+            !existingRules.contains(where: { rule in
+                rule.original.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare(correction.wrong) == .orderedSame
+                    && rule.replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare(correction.right) == .orderedSame
+            })
+        }
+    }
+
     @discardableResult
     private static func persist(
         documentID: UUID,

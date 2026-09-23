@@ -66,6 +66,20 @@ final class SavedPeopleStore: ObservableObject {
         }
     }
 
+    /// Removes a saved person, such as when a Recording edit that created
+    /// them fails to save. A no-op if the id is not present.
+    func remove(id: UUID) throws {
+        guard people.contains(where: { $0.id == id }) else { return }
+        guard !couldNotLoad else { throw StoreError.unreadable }
+        do {
+            try persist(people.filter { $0.id != id })
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            throw error
+        }
+    }
+
     private func persist(_ proposedPeople: [SavedPerson]) throws {
         let sorted = proposedPeople.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         let encoder = JSONEncoder()

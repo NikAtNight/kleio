@@ -206,16 +206,20 @@ struct ScribeApp: App {
                         KleioURLCommandHandler(recording: recording, library: library, queue: queue,
                                                dictation: dictation, appState: appState).handle(command)
                     }
-                    appDelegate.hasBackgroundWork = { queue.isBusy || summaries.isBusy || backups.isWorking }
+                    appDelegate.hasBackgroundWork = {
+                        queue.isBusy || summaries.isBusy || backups.isWorking || dictation.phase != .idle
+                    }
                     appDelegate.recording = recording
                     appDelegate.finishRecording = {
                         await recording.prepareToQuit(library: library, queue: queue)
                         let transcriptSaved = await queue.prepareToQuit()
                         let summariesSaved = await summaries.prepareToQuit()
                         let backupFinished = await backups.prepareToQuit()
+                        await dictation.prepareToQuit()
                         return !recording.isBusy && !queue.isBusy && !summaries.isBusy && !backups.isWorking
                             && transcriptSaved && summariesSaved && backupFinished
                     }
+                    appDelegate.willTerminate = { callDetection.releaseBeforeQuit() }
                     appDelegate.calendarSync = calendarSync
                     appDelegate.autoRecordArbiter = autoRecordArbiter
                     calendarSync.start()
@@ -223,7 +227,8 @@ struct ScribeApp: App {
                         calendarSync: calendarSync,
                         recording: recording,
                         library: library,
-                        queue: queue
+                        queue: queue,
+                        startBlocked: { dictation.phase != .idle || backups.isWorking }
                     )
                     callDetection.configure(recording: recording, library: library,
                         presentationBlocked: {
@@ -292,7 +297,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     weak var recording: RecordingSession?
     var finishRecording: (() async -> Bool)?
     var hasBackgroundWork: (() -> Bool)?
+    var willTerminate: (() -> Void)?
     private var terminating = false
+
+    func applicationWillTerminate(_ notification: Notification) {
+        willTerminate?()
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard recording?.isBusy == true || hasBackgroundWork?() == true else {

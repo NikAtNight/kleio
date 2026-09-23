@@ -36,6 +36,19 @@ enum RecordingMode: String, CaseIterable, Identifiable {
     var usesSystem: Bool { self != .microphoneOnly }
 }
 
+/// Who started a recording. Auto-record owns only the recordings it started.
+enum RecordingOrigin: Equatable {
+    case manual
+    case autoRecord
+}
+
+/// Read-only facts about the recording in progress, for stop policies.
+struct ActiveRecording: Equatable {
+    let mode: RecordingMode
+    let origin: RecordingOrigin
+    let application: RecordingApplication?
+}
+
 /// Fixed-size source-level history. Audio callbacks can arrive faster than a
 /// display needs, so this also limits captured samples to a stable cadence.
 struct LevelHistory: Equatable {
@@ -111,15 +124,16 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var systemHistory: [Float] = []
     @Published private(set) var activeDocumentID: UUID?
     @Published private(set) var activeCalendarEventTitle: String?
+    private(set) var activeRecording: ActiveRecording?
     @Published var lastError: String?
     private(set) var lastWaveformAppend = Date.distantPast
     static let waveformSampleInterval: TimeInterval = 0.05
 
     private let dependencies: RecordingSessionDependencies
+    private let defaults: UserDefaults
     private weak var recordingLibrary: LibraryStore?
     private var capture: (any RecordingCaptureDriving)?
     private var clock: RecordingClock?
-    private var application: RecordingApplication?
     private var processIDs: [UInt32] = []
     private var nextProcessCheck: TimeInterval = 0
     private var lastMicCallback: TimeInterval = 0
@@ -133,8 +147,41 @@ final class RecordingSession: ObservableObject {
     private var micLevelHistory = LevelHistory(minimumInterval: 0)
     private var systemLevelHistory = LevelHistory(minimumInterval: 0)
 
-    init(dependencies: RecordingSessionDependencies = .live) {
+    init(dependencies: RecordingSessionDependencies = .live, defaults: UserDefaults = .standard) {
         self.dependencies = dependencies
+        self.defaults = defaults
+    }
+
+    /// Every UI and calendar start resolves saved preferences here, so no start path skips them.
+    func startUsingPreferences(mode: RecordingMode, library: LibraryStore, shortcut: RecordingApplication? = nil,
+                               calendarEvent: AutoRecordEvent? = nil) async {
+        let videoMode = defaults.bool(forKey: "recordingVideoEnabled")
+            ? VideoCaptureMode(rawValue: defaults.string(forKey: "recordingVideoMode") ?? "window") : nil
+        await startUsingPreferences(mode: mode, library: library, shortcut: shortcut, videoMode: videoMode,
+                                    calendarEvent: calendarEvent)
+    }
+
+    func startUsingPreferences(mode: RecordingMode, library: LibraryStore, shortcut: RecordingApplication?,
+                               videoMode: VideoCaptureMode?, calendarEvent: AutoRecordEvent? = nil,
+                               storeCalendarDetails: Bool = true, origin: RecordingOrigin = .manual) async {
+        let microphoneName = defaults.string(forKey: "microphoneSpeakerName")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Me"
+        let count = defaults.integer(forKey: "expectedRemoteSpeakerCount")
+        await start(mode: mode, library: library,
+                    calendarEvent: calendarEvent,
+                    storeCalendarDetails: storeCalendarDetails,
+                    application: shortcut,
+                    videoMode: videoMode,
+                    microphoneSpeakerName: microphoneName.isEmpty ? "Me" : microphoneName,
+                    expectedRemoteSpeakerCount: count > 0 ? count : nil,
+                    meetingMuteSyncEnabled: defaults.bool(forKey: "meetingMuteSyncEnabled"),
+                    origin: origin)
+    }
+
+    /// Auto-record starts unattended, so it never opens the video picker. The picker
+    /// would hold the start open until someone answers it.
+    func startAutoRecording(for event: AutoRecordEvent, library: LibraryStore, storeCalendarDetails: Bool) async {
+        await startUsingPreferences(mode: .meeting, library: library, shortcut: nil, videoMode: nil,
+                                    calendarEvent: event, storeCalendarDetails: storeCalendarDetails, origin: .autoRecord)
     }
 
     func start(
@@ -146,7 +193,8 @@ final class RecordingSession: ObservableObject {
         videoMode: VideoCaptureMode? = nil,
         microphoneSpeakerName: String = "Me",
         expectedRemoteSpeakerCount: Int? = nil,
-        meetingMuteSyncEnabled: Bool = false
+        meetingMuteSyncEnabled: Bool = false,
+        origin: RecordingOrigin = .manual
     ) async {
         guard !isBusy, !library.hasPendingRecordingSaves, useLibrary(library) else { return }
         isStarting = true
@@ -195,7 +243,7 @@ final class RecordingSession: ObservableObject {
             guard library.add(doc) else { throw CaptureStartError.message(library.lastError ?? "The recording could not be saved.") }
             activeDocumentID = doc.id
             activeCalendarEventTitle = calendarEvent?.title
-            self.application = application
+            activeRecording = ActiveRecording(mode: mode, origin: origin, application: application)
             let folder = library.folder(for: doc.id)
             let clock = RecordingClock()
             self.clock = clock
@@ -292,6 +340,7 @@ final class RecordingSession: ObservableObject {
             muteObservation = nil
             activeDocumentID = nil
             activeCalendarEventTitle = nil
+            activeRecording = nil
         }
     }
 
@@ -330,7 +379,7 @@ final class RecordingSession: ObservableObject {
         if now >= nextProcessCheck {
             nextProcessCheck = now + 2
             var warning: String?
-            if let application {
+            if let application = activeRecording?.application {
                 do {
                     let ids = try dependencies.resolveApplication(application)
                     if ids != processIDs { try capture?.updateProcesses(ids); processIDs = ids }
@@ -397,6 +446,7 @@ final class RecordingSession: ObservableObject {
                 self.isFinalizing = false
                 self.activeDocumentID = nil
                 self.activeCalendarEventTitle = nil
+                self.activeRecording = nil
                 self.finalizationTask = nil
             }
             var videoResult: RecordingVideoStopResult?

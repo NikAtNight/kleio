@@ -182,23 +182,87 @@ enum CallPresenceParser {
     }
 }
 
+/// Accessibility and clock access for `MeetingMuteReader`. Tests substitute a scripted tree.
+protocol MeetingAccessibility {
+    var isTrusted: Bool { get }
+    var now: TimeInterval { get }
+    /// The only running instance of the bundle, or nil when there are none or several.
+    func processID(bundleID: String) -> pid_t?
+    func application(_ processID: pid_t) -> CFTypeRef
+    func copy(_ element: CFTypeRef, _ attribute: String, timeout: Float) -> (error: AXError, value: CFTypeRef?)
+    func set(_ element: CFTypeRef, _ attribute: String, to value: Bool) -> AXError
+}
+
+struct NativeMeetingAccessibility: MeetingAccessibility {
+    var isTrusted: Bool { AXIsProcessTrusted() }
+    var now: TimeInterval { RecordingClock.now }
+
+    func processID(bundleID: String) -> pid_t? {
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).filter { !$0.isTerminated }
+        return apps.count == 1 ? apps[0].processIdentifier : nil
+    }
+
+    func application(_ processID: pid_t) -> CFTypeRef { AXUIElementCreateApplication(processID) }
+
+    func copy(_ element: CFTypeRef, _ attribute: String, timeout: Float) -> (error: AXError, value: CFTypeRef?) {
+        guard CFGetTypeID(element) == AXUIElementGetTypeID() else { return (.illegalArgument, nil) }
+        let element = element as! AXUIElement
+        // Timeouts belong to each AX object, not its application's subtree.
+        guard AXUIElementSetMessagingTimeout(element, timeout) == .success else { return (.failure, nil) }
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        return (error, value)
+    }
+
+    func set(_ element: CFTypeRef, _ attribute: String, to value: Bool) -> AXError {
+        guard CFGetTypeID(element) == AXUIElementGetTypeID() else { return .illegalArgument }
+        let element = element as! AXUIElement
+        guard AXUIElementSetMessagingTimeout(element, 0.1) == .success else { return .failure }
+        return AXUIElementSetAttributeValue(element, attribute as CFString, value ? kCFBooleanTrue : kCFBooleanFalse)
+    }
+}
+
 /// Call only from one serial background queue. AX references are never shared with the audio thread.
 final class MeetingMuteReader: MeetingMuteReading {
     private struct CachedNode {
-        var element: AXUIElement
+        var element: CFTypeRef
         var role: String
     }
     private struct Identity {
-        var element: AXUIElement
+        var element: CFTypeRef
         var documentDigest: String?
         var token: String
     }
+    private struct Limits {
+        var duration: TimeInterval
+        var nodes: Int
+        var callTimeout: TimeInterval
+        var depth: Int
+        var failsBeyondDepth: Bool
+    }
+    private struct Exposure {
+        var processID: pid_t
+        var requestedAt: TimeInterval
+        var restoresEnhancedInterface: Bool
+    }
     private enum ReadFailure: Error { case unavailable }
+    // Mute sync fails closed: an unread subtree could hide a contradicting microphone control.
+    private static let muteLimits = Limits(duration: 0.18, nodes: 1800, callTimeout: 0.015, depth: 28, failsBeyondDepth: true)
+    // Exposed Chromium trees are larger and slower on first access. Their deepest parts rarely hold call controls.
+    private static let callLimits = Limits(duration: 0.4, nodes: 4000, callTimeout: 0.05, depth: 48, failsBeyondDepth: false)
+    /// Chromium fills in a newly requested tree over a few seconds.
+    static let exposureWarmUp: TimeInterval = 5
+    private let ax: MeetingAccessibility
+    private let log: (String) -> Void
     private var nodes: [CFHashCode: CachedNode] = [:]
     private var identities: [Identity] = []
     private var processID: pid_t?
+    private var exposure: Exposure?
+    private var lastDebugEntry: String?
+    private var limits = MeetingMuteReader.muteLimits
     private var deadline: TimeInterval = 0
     private var visited = 0
+    private var webAreas = 0
     private static let browserBundles: Set<String> = [
         "com.apple.Safari", "com.apple.SafariTechnologyPreview", "com.google.Chrome",
         "com.google.Chrome.beta", "com.google.Chrome.canary", "org.chromium.Chromium",
@@ -212,27 +276,108 @@ final class MeetingMuteReader: MeetingMuteReading {
     ]
     private static let controlRoles: Set<String> = ["AXButton", "AXCheckBox", "AXSwitch"]
 
+    init(accessibility: MeetingAccessibility = NativeMeetingAccessibility(),
+         log: @escaping (String) -> Void = { DiagLog.logToFileOnly($0) }) {
+        ax = accessibility
+        self.log = log
+    }
+
     static func supportsCallDetection(bundleID: String) -> Bool {
         MeetingMuteParser.Provider.native(bundleID: bundleID) != nil
             || bundleID == "com.apple.FaceTime" || browserBundles.contains(bundleID)
     }
 
+    /// Slack (Electron) and Teams (WebView2) hide their web content until an assistive client asks for it.
+    /// Teams does not support AXManualAccessibility. AXEnhancedUserInterface also animates window frame changes,
+    /// which interferes with window managers, so it is limited to Teams.
+    static func exposureAttribute(bundleID: String) -> String? {
+        switch MeetingMuteParser.Provider.native(bundleID: bundleID) {
+        case .slack: return "AXManualAccessibility"
+        case .teams: return "AXEnhancedUserInterface"
+        default: return nil
+        }
+    }
+
     func read(application: RecordingApplication) -> MeetingMuteObservation {
         let snapshot = snapshot(application: application, forCallDetection: false)
-        let result = MeetingMuteParser.parse(snapshot, sourceName: application.name, observedAt: RecordingClock.now)
+        let result = MeetingMuteParser.parse(snapshot, sourceName: application.name, observedAt: ax.now)
         if case .unavailable = result.state { identities.removeAll(keepingCapacity: true) }
         return result
     }
 
-    func readCall(application: RecordingApplication) -> CallPresence {
+    /// Call only while call detection is enabled. The first read of Slack or Teams asks it to expose its content.
+    func readCall(application: RecordingApplication, debug: Bool = false) -> CallPresence {
         let snapshot = snapshot(application: application, forCallDetection: true)
-        return CallPresenceParser.parse(snapshot, isBrowser: Self.browserBundles.contains(application.bundleID))
+        var presence = CallPresenceParser.parse(snapshot, isBrowser: Self.browserBundles.contains(application.bundleID))
+        var reason = snapshot.failure
+        if presence == .inactive, Self.exposureAttribute(bundleID: application.bundleID) != nil, snapshot.failure == nil {
+            // An empty or still-loading tree is not evidence that the call ended.
+            if let exposure, ax.now - exposure.requestedAt < Self.exposureWarmUp {
+                presence = .unknown
+                reason = "content is still loading"
+            } else if webAreas == 0 {
+                presence = .unknown
+                reason = "no web content is exposed"
+            }
+        }
+        if debug {
+            // Button labels only. Window titles and URLs are never read into the snapshot.
+            var seen = Set<String>()
+            let labels = snapshot.contexts.flatMap(\.controls)
+                .filter { $0.role == "AXButton" && $0.enabled }
+                .flatMap(\.labels)
+                .map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)) }
+                .filter { !$0.isEmpty && seen.insert($0).inserted }
+            let summary: String
+            switch presence {
+            case .active(_, let name): summary = "active (\(name))"
+            case .inactive: summary = "inactive"
+            case .readyToJoin: summary = "ready to join"
+            case .unknown: summary = "unknown (\(reason ?? "ambiguous controls"))"
+            }
+            // Polls repeat every 2 seconds, so only log when the result or the buttons change.
+            let buttons = labels.prefix(80).joined(separator: " | ")
+            if lastDebugEntry != summary + buttons {
+                lastDebugEntry = summary + buttons
+                log("call detection \(application.bundleID): \(summary); \(snapshot.contexts.count) contexts, "
+                    + "\(visited) nodes; enabled buttons: \(buttons)")
+            }
+        }
+        return presence
+    }
+
+    /// Clears AXEnhancedUserInterface if this reader turned it on. Slack's flag has no visible side effect.
+    func releaseAccessibility() {
+        guard let exposure else { return }
+        self.exposure = nil
+        guard exposure.restoresEnhancedInterface else { return }
+        _ = ax.set(ax.application(exposure.processID), "AXEnhancedUserInterface", to: false)
+    }
+
+    private func expose(_ root: CFTypeRef, processID: pid_t, bundleID: String) {
+        guard exposure?.processID != processID, let name = Self.exposureAttribute(bundleID: bundleID) else { return }
+        var restores = false
+        if name == "AXEnhancedUserInterface" {
+            // Leave another assistive client's setting alone, including when this reader is released.
+            let current = ax.copy(root, name, timeout: 0.05)
+            guard (current.value as? Bool) != true else {
+                exposure = .init(processID: processID, requestedAt: ax.now, restoresEnhancedInterface: false)
+                return
+            }
+            // Only claim the flag when it was read as off. After a timed-out read it may
+            // belong to VoiceOver, so Kleio sets it but never clears it.
+            restores = current.error == .success ? (current.value as? Bool) == false : current.error == .noValue
+        }
+        // Teams applies the flag but reports kAXErrorNotImplemented, so the result is not a reliable signal.
+        _ = ax.set(root, name, to: true)
+        exposure = .init(processID: processID, requestedAt: ax.now, restoresEnhancedInterface: restores)
     }
 
     private func snapshot(application: RecordingApplication, forCallDetection: Bool) -> MeetingMuteParser.Snapshot {
-        let startedAt = RecordingClock.now
-        deadline = startedAt + 0.18
+        limits = forCallDetection ? Self.callLimits : Self.muteLimits
+        deadline = ax.now + limits.duration
         visited = 0
+        webAreas = 0
         func unavailable(_ reason: String) -> MeetingMuteParser.Snapshot {
             nodes.removeAll(keepingCapacity: true)
             if !forCallDetection { identities.removeAll(keepingCapacity: true) }
@@ -244,20 +389,19 @@ final class MeetingMuteReader: MeetingMuteReading {
         guard nativeProvider != nil || isBrowser else {
             return unavailable("Automatic mute reading is unavailable for this app.")
         }
-        guard AXIsProcessTrusted() else { return unavailable("Accessibility access is required to read meeting mute controls.") }
-        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: application.bundleID).filter { !$0.isTerminated }
-        guard apps.count == 1, let app = apps.first else { return unavailable("A unique running meeting app could not be found.") }
-        if processID != app.processIdentifier {
+        guard ax.isTrusted else { return unavailable("Accessibility access is required to read meeting mute controls.") }
+        guard let pid = ax.processID(bundleID: application.bundleID) else { return unavailable("A unique running meeting app could not be found.") }
+        if processID != pid {
             nodes.removeAll(keepingCapacity: true)
             identities.removeAll(keepingCapacity: true)
-            processID = app.processIdentifier
+            processID = pid
         }
-        let root = AXUIElementCreateApplication(app.processIdentifier)
+        let root = ax.application(pid)
+        if forCallDetection { expose(root, processID: pid, bundleID: application.bundleID) }
         do {
-            guard let windows = try attribute(root, kAXWindowsAttribute) as? [AXUIElement] else { throw ReadFailure.unavailable }
             var contexts: [MeetingMuteParser.Context] = []
             var currentIdentities: [Identity] = []
-            for window in windows {
+            for window in try windows(root) {
                 if isBrowser {
                     try webContexts(window, depth: 0, contexts: &contexts, currentIdentities: &currentIdentities)
                 } else if let provider = nativeProvider {
@@ -283,17 +427,26 @@ final class MeetingMuteReader: MeetingMuteReading {
         }
     }
 
-    private func checkBudget() throws {
-        guard RecordingClock.now < deadline, visited < 1800 else { throw ReadFailure.unavailable }
+    /// Windows on another Space are missing from AXWindows, but the main or focused window can still be read.
+    private func windows(_ root: CFTypeRef) throws -> [CFTypeRef] {
+        guard var windows = try attribute(root, kAXWindowsAttribute) as? [CFTypeRef] else { throw ReadFailure.unavailable }
+        for name in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
+            // These are extras, so an error reading one means no extra window rather than a failed read.
+            guard let window = (try? attribute(root, name)) ?? nil,
+                  !windows.contains(where: { CFEqual($0, window) }) else { continue }
+            windows.append(window)
+        }
+        return windows
     }
 
-    private func attribute(_ element: AXUIElement, _ name: String) throws -> CFTypeRef? {
+    private func checkBudget() throws {
+        guard ax.now < deadline, visited < limits.nodes else { throw ReadFailure.unavailable }
+    }
+
+    private func attribute(_ element: CFTypeRef, _ name: String) throws -> CFTypeRef? {
         try checkBudget()
-        // Timeouts belong to each AX object, not its application's subtree.
-        let timeout = Float(min(0.015, max(0.001, deadline - RecordingClock.now)))
-        guard AXUIElementSetMessagingTimeout(element, timeout) == .success else { throw ReadFailure.unavailable }
-        var value: CFTypeRef?
-        let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+        let timeout = Float(min(limits.callTimeout, max(0.001, deadline - ax.now)))
+        let (error, value) = ax.copy(element, name, timeout: timeout)
         try checkBudget()
         switch error {
         case .success: return value
@@ -302,43 +455,51 @@ final class MeetingMuteReader: MeetingMuteReading {
         }
     }
 
-    private func role(_ element: AXUIElement) throws -> String {
+    private func role(_ element: CFTypeRef) throws -> String {
         try checkBudget()
         visited += 1
         let key = CFHash(element)
         if let cached = nodes[key], CFEqual(cached.element, element), !Self.controlRoles.contains(cached.role) { return cached.role }
         guard let role = try attribute(element, kAXRoleAttribute) as? String else { throw ReadFailure.unavailable }
         nodes[key] = .init(element: element, role: role)
-        if nodes.count > 1800 { nodes.removeAll(keepingCapacity: true) }
+        if nodes.count > limits.nodes { nodes.removeAll(keepingCapacity: true) }
         return role
     }
 
-    private func children(_ element: AXUIElement) throws -> [AXUIElement] {
-        try attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    private func children(_ element: CFTypeRef) throws -> [CFTypeRef] {
+        try attribute(element, kAXChildrenAttribute) as? [CFTypeRef] ?? []
     }
 
-    private func collectControls(_ element: AXUIElement, depth: Int, controls: inout [MeetingMuteParser.Control], isWebDocument: Bool = false) throws {
-        guard depth < 28 else { throw ReadFailure.unavailable }
+    /// Beyond the depth limit, call detection keeps what it has read. Mute sync fails the read.
+    private func withinDepth(_ depth: Int) throws -> Bool {
+        guard depth >= limits.depth else { return true }
+        if limits.failsBeyondDepth { throw ReadFailure.unavailable }
+        return false
+    }
+
+    private func collectControls(_ element: CFTypeRef, depth: Int, controls: inout [MeetingMuteParser.Control], isWebDocument: Bool = false) throws {
+        guard try withinDepth(depth) else { return }
         let role = try role(element)
         guard !Self.skippedRoles.contains(role) else { return }
+        if role == "AXWebArea" { webAreas += 1 }
         // An embedded document has a separate origin and cannot supply the outer call's controls.
         if isWebDocument && depth > 0 && role == "AXWebArea" { return }
         if Self.controlRoles.contains(role) {
-            let readStartedAt = RecordingClock.now
+            let readStartedAt = ax.now
             var labels: [String] = []
             for name in [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute] {
                 if let text = try attribute(element, name) as? String { labels.append(text) }
             }
             guard let enabled = try attribute(element, kAXEnabledAttribute) as? NSNumber else { throw ReadFailure.unavailable }
             controls.append(.init(labels: labels, enabled: enabled.boolValue, role: role,
-                                  readStartedAt: readStartedAt, observedAt: RecordingClock.now))
+                                  readStartedAt: readStartedAt, observedAt: ax.now))
             return
         }
         for child in try children(element) { try collectControls(child, depth: depth + 1, controls: &controls, isWebDocument: isWebDocument) }
     }
 
-    private func webContexts(_ element: AXUIElement, depth: Int, contexts: inout [MeetingMuteParser.Context], currentIdentities: inout [Identity]) throws {
-        guard depth < 28 else { throw ReadFailure.unavailable }
+    private func webContexts(_ element: CFTypeRef, depth: Int, contexts: inout [MeetingMuteParser.Context], currentIdentities: inout [Identity]) throws {
+        guard try withinDepth(depth) else { return }
         let role = try role(element)
         guard !Self.skippedRoles.contains(role), !Self.controlRoles.contains(role) else { return }
         if role == "AXWebArea" {
@@ -356,7 +517,7 @@ final class MeetingMuteReader: MeetingMuteReading {
         for child in try children(element) { try webContexts(child, depth: depth + 1, contexts: &contexts, currentIdentities: &currentIdentities) }
     }
 
-    private func identity(for element: AXUIElement, documentDigest: String?, current: inout [Identity]) -> String {
+    private func identity(for element: CFTypeRef, documentDigest: String?, current: inout [Identity]) -> String {
         let existing = identities.first { CFEqual($0.element, element) && $0.documentDigest == documentDigest }
         let identity = existing ?? Identity(element: element, documentDigest: documentDigest, token: UUID().uuidString)
         current.append(identity)

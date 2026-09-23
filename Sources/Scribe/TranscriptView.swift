@@ -143,9 +143,15 @@ struct TranscriptView: View {
         .task(id: document.id) {
             title = document.title
             selectedTab = hasSummary ? .summary : .transcript
-            if var current = library.document(id: document.id) {
-                current.normalizeSpeakerIdentities()
-                if current != document { library.update(current) }
+            do {
+                try DocumentEditing.normalizeSpeakerIdentitiesOnOpen(documentID: document.id, library: library)
+            } catch {
+                // Background housekeeping on open, not a user action: log it
+                // instead of interrupting with an alert.
+                DiagLog.log(
+                    "speaker identity normalization on open failed for %@: %@",
+                    document.id.uuidString, error.localizedDescription
+                )
             }
             await playback.load(document: document, folder: library.folder(for: document.id))
         }
@@ -753,29 +759,18 @@ struct TranscriptView: View {
     }
 
     private func commitSegmentEdit(_ segmentID: UUID, text: String) -> Bool {
-        let oldText: String
         do {
-            guard let savedOldText = try DocumentEditing.updateSegmentText(
-                text, segmentID: segmentID, documentID: document.id, library: library
-            ) else { return true }
-            oldText = savedOldText
+            if let suggestions = try DocumentEditing.commitSegmentEdit(
+                text, segmentID: segmentID, documentID: document.id, library: library,
+                existingRules: replacements.rules
+            ) {
+                correctionSuggestions = suggestions
+            }
+            return true
         } catch {
             documentEditError = error.localizedDescription
             return false
         }
-        let corrections = DictationDiff.proposedCorrections(original: oldText, edited: text)
-        guard (1...3).contains(corrections.count),
-              oldText.split(whereSeparator: { $0.isWhitespace }).count
-                == text.split(whereSeparator: { $0.isWhitespace }).count else { return true }
-        correctionSuggestions = corrections.filter { correction in
-            !replacements.rules.contains(where: { rule in
-                rule.original.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .caseInsensitiveCompare(correction.wrong) == .orderedSame
-                    && rule.replacement.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .caseInsensitiveCompare(correction.right) == .orderedSame
-            })
-        }
-        return true
     }
 
     private func commitNoteEdit(_ noteID: UUID, text: String) -> Bool {
@@ -810,17 +805,17 @@ struct TranscriptView: View {
     }
 
     private func saveSpeakerName(_ id: UUID, name: String, savedPersonID: UUID?, savePerson: Bool) throws {
-        guard let current = library.document(id: document.id),
-              current.speakers?.contains(where: { $0.id == id && !$0.isMicrophone }) == true,
-              current.speakerAnalysisStatus != .running else { throw DocumentEditing.Failure.speakerUnavailable }
-        let personID = try savePerson ? savedPeople.add(name: name).id : savedPersonID
-        _ = try DocumentEditing.applySpeakerEdit(
+        _ = try DocumentEditing.renameSpeaker(
+            id,
+            to: name,
+            savedPersonID: savedPersonID,
+            savePerson: savePerson,
             documentID: document.id,
             library: library,
+            savedPeople: savedPeople,
             undoManager: undoManager,
             actionName: "Rename speaker",
-            onUndoFailure: { documentEditError = $0 },
-            change: { $0.renameSpeaker(id: id, to: name, savedPersonID: personID) }
+            onUndoFailure: { documentEditError = $0 }
         )
     }
 

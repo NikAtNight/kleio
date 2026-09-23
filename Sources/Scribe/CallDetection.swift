@@ -97,7 +97,7 @@ private final class CallPresenceScanner: @unchecked Sendable {
     private let queue = DispatchQueue(label: "Kleio.CallDetection", qos: .utility)
     private var readers: [String: MeetingMuteReader] = [:]
 
-    func scan(_ applications: [RecordingApplication]) async -> [CallDetectionSample] {
+    func scan(_ applications: [RecordingApplication], debug: Bool) async -> [CallDetectionSample] {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
                 let running = Set(applications.map(\.bundleID))
@@ -105,11 +105,25 @@ private final class CallPresenceScanner: @unchecked Sendable {
                 let samples = applications.map { app in
                     let reader = readers[app.bundleID] ?? MeetingMuteReader()
                     readers[app.bundleID] = reader
-                    return CallDetectionSample(application: app, presence: reader.readCall(application: app))
+                    return CallDetectionSample(application: app, presence: reader.readCall(application: app, debug: debug))
                 }
                 continuation.resume(returning: samples)
             }
         }
+    }
+
+    /// Undoes accessibility changes made for detection. The next scan requests them again.
+    /// Quitting waits so Teams isn't left with AXEnhancedUserInterface on.
+    func release(waitUntilDone: Bool = false) {
+        let work = { [self] in
+            readers.values.forEach { $0.releaseAccessibility() }
+            readers.removeAll()
+        }
+        guard waitUntilDone else { queue.async(execute: work); return }
+        // Bounded so an unresponsive app can't hold up quitting.
+        let done = DispatchSemaphore(value: 0)
+        queue.async { work(); done.signal() }
+        _ = done.wait(timeout: .now() + 0.5)
     }
 }
 
@@ -118,10 +132,17 @@ final class CallDetectionController: ObservableObject {
     @Published var enabled: Bool {
         didSet {
             defaults.set(enabled, forKey: "callDetectionEnabled")
-            if !enabled { hidePrompt() }
+            if !enabled {
+                hidePrompt()
+                scanner.release()
+            }
         }
     }
     @Published private(set) var accessibilityGranted = false
+    /// Opt-in diagnostics: `defaults write app.talix.scribe callDetectionDebug -bool true`.
+    var debugLogging: Bool { defaults.bool(forKey: "callDetectionDebug") }
+
+    func releaseBeforeQuit() { scanner.release(waitUntilDone: true) }
     private let defaults: UserDefaults
     private let scanner = CallPresenceScanner()
     private var core = CallPromptCore()
@@ -170,7 +191,7 @@ final class CallDetectionController: ObservableObject {
         let applications = RecordingApplication.runningApplications().filter {
             MeetingMuteReader.supportsCallDetection(bundleID: $0.bundleID)
         }
-        let samples = await scanner.scan(applications)
+        let samples = await scanner.scan(applications, debug: debugLogging)
         guard enabled, AXIsProcessTrusted(), !starting else { hidePrompt(); return }
         let call = core.update(samples, at: RecordingClock.now,
                                recordingBusy: recording.isBusy || library.hasPendingRecordingSaves,
@@ -207,7 +228,7 @@ final class CallDetectionController: ObservableObject {
         let applications = RecordingApplication.runningApplications().filter {
             MeetingMuteReader.supportsCallDetection(bundleID: $0.bundleID)
         }
-        let samples = await scanner.scan(applications)
+        let samples = await scanner.scan(applications, debug: false)
         guard enabled, !recording.isBusy, !presentationBlocked(),
               case .active(let contextID, _) = samples.first(where: { $0.application == call.application })?.presence,
               contextID == call.contextID else { return }

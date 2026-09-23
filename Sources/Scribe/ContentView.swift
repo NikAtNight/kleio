@@ -731,29 +731,6 @@ struct RemoteSpeakerCountPicker: View {
     }
 }
 
-@MainActor
-extension RecordingSession {
-    func startUsingPreferences(mode: RecordingMode, library: LibraryStore, shortcut: RecordingApplication? = nil) async {
-        let defaults = UserDefaults.standard
-        let videoMode = defaults.bool(forKey: "recordingVideoEnabled")
-            ? VideoCaptureMode(rawValue: defaults.string(forKey: "recordingVideoMode") ?? "window") : nil
-        await startUsingPreferences(mode: mode, library: library, shortcut: shortcut, videoMode: videoMode)
-    }
-
-    func startUsingPreferences(mode: RecordingMode, library: LibraryStore, shortcut: RecordingApplication?,
-                               videoMode: VideoCaptureMode?) async {
-        let defaults = UserDefaults.standard
-        let microphoneName = defaults.string(forKey: "microphoneSpeakerName")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Me"
-        let count = defaults.integer(forKey: "expectedRemoteSpeakerCount")
-        await start(mode: mode, library: library,
-                    application: shortcut,
-                    videoMode: videoMode,
-                    microphoneSpeakerName: microphoneName.isEmpty ? "Me" : microphoneName,
-                    expectedRemoteSpeakerCount: count > 0 ? count : nil,
-                    meetingMuteSyncEnabled: defaults.bool(forKey: "meetingMuteSyncEnabled"))
-    }
-}
-
 struct RecentDocumentCard: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var queue: TranscriptionQueue
