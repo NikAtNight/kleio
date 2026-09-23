@@ -257,11 +257,10 @@ struct TranscriptView: View {
                             Label("Transcript changed since this summary was generated", systemImage: "exclamationmark.circle")
                                 .font(.headline)
                                 .foregroundStyle(.orange)
-                            Text("Regenerate the summary to use the latest transcript, notes, title, and speaker names.")
+                            Text("Regenerate the summary to use the latest transcript, notes, and speaker names.")
                                 .foregroundStyle(.secondary)
                             DisclosureGroup("Show previous summary") {
-                                Text(LocalizedStringKey(summary))
-                                    .textSelection(.enabled)
+                                SummaryMarkdownView(markdown: summary)
                                     .padding(.top, 8)
                             }
                         } else if let problem = SummaryService.outputProblem(summary) {
@@ -271,15 +270,11 @@ struct TranscriptView: View {
                             Text(problem)
                                 .foregroundStyle(.secondary)
                             DisclosureGroup("Show previous output") {
-                                Text(LocalizedStringKey(summary))
-                                    .textSelection(.enabled)
+                                SummaryMarkdownView(markdown: summary)
                                     .padding(.top, 8)
                             }
                         } else {
-                            Text(LocalizedStringKey(summary))
-                                .font(.system(size: 16))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            SummaryMarkdownView(markdown: summary)
                         }
                         if summarizing {
                             HStack(spacing: 8) {

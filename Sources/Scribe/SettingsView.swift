@@ -536,11 +536,34 @@ struct AISettings: View {
     @AppStorage("aiAPIKey") private var apiKey = ""
     @AppStorage("aiModel") private var model = ""
     @AppStorage("aiOllamaModel") private var ollamaModel = ""
+    @AppStorage("aiModel.claudeCode") private var claudeCodeModel = ""
+    @AppStorage("aiModel.codex") private var codexModel = ""
+    @AppStorage("aiModel.cursor") private var cursorModel = ""
     @AppStorage("summaryPrompt") private var prompt = ""
     @State private var ollamaModels: [String] = []
+    @State private var cliModels: [SubscriptionCLI.ModelOption] = []
 
     private var selectedProvider: SummaryService.Provider {
         SummaryService.Provider(rawValue: provider) ?? .anthropic
+    }
+
+    private var modelBinding: Binding<String> {
+        switch selectedProvider {
+        case .ollama: return $ollamaModel
+        case .claudeCode: return $claudeCodeModel
+        case .codex: return $codexModel
+        case .cursor: return $cursorModel
+        case .anthropic, .openai, .appleIntelligence: return $model
+        }
+    }
+
+    private var privacyNote: String {
+        if let cli = selectedProvider.subscriptionCLI {
+            return "Summaries run the \(cli.displayName) CLI on this Mac with its tools turned off. The transcript goes to \(cli.company) and counts toward your subscription's usage limits."
+        }
+        return selectedProvider == .appleIntelligence || selectedProvider == .ollama
+            ? "Local providers never send the transcript off the Mac."
+            : "Summaries send the transcript to the provider you choose, using your own key. Leave the key empty to keep Kleio fully offline."
     }
 
     var body: some View {
@@ -555,6 +578,10 @@ struct AISettings: View {
                 SecureField("API key:", text: $apiKey)
             }
 
+            if let cli = selectedProvider.subscriptionCLI {
+                SubscriptionCLIStatusRow(cli: cli)
+            }
+
             if selectedProvider == .ollama, !ollamaModels.isEmpty {
                 Picker("Model:", selection: $ollamaModel) {
                     Text("Choose a model").tag("")
@@ -565,10 +592,22 @@ struct AISettings: View {
                             .disabled(!SummaryService.supportsSummaries(model: installedModel))
                     }
                 }
+            } else if let cli = selectedProvider.subscriptionCLI {
+                Picker("Model:", selection: modelBinding) {
+                    Text(cli.defaultModelName).tag("")
+                    let saved = modelBinding.wrappedValue
+                    // Keep a model chosen earlier visible even if the CLI no longer lists it.
+                    if !saved.isEmpty, !cliModels.contains(where: { $0.id == saved }) {
+                        Text(saved).tag(saved)
+                    }
+                    ForEach(cliModels, id: \.self) { option in
+                        Text(option.name).tag(option.id)
+                    }
+                }
             } else if selectedProvider != .appleIntelligence {
                 TextField(
                     "Model:",
-                    text: selectedProvider == .ollama ? $ollamaModel : $model,
+                    text: modelBinding,
                     prompt: Text(selectedProvider.defaultModel)
                 )
             }
@@ -597,19 +636,84 @@ struct AISettings: View {
                     }
             }
 
-            Text(selectedProvider == .appleIntelligence || selectedProvider == .ollama
-                 ? "Local providers never send the transcript off the Mac."
-                 : "Summaries send the transcript to the provider you choose, using your own key. Leave the key empty to keep Kleio fully offline.")
+            Text(privacyNote)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
         .task(id: provider) {
-            guard selectedProvider == .ollama else {
-                ollamaModels = []
-                return
+            ollamaModels = []
+            cliModels = []
+            if selectedProvider == .ollama {
+                ollamaModels = await OllamaClient().installedModels()
+            } else if let cli = selectedProvider.subscriptionCLI {
+                cliModels = await cli.availableModels()
             }
-            ollamaModels = await OllamaClient().installedModels()
+        }
+    }
+}
+
+/// Shows whether a subscription CLI is installed and signed in. Sign-in
+/// happens in the CLI itself; Kleio only opens Terminal on its login command.
+private struct SubscriptionCLIStatusRow: View {
+    let cli: SubscriptionCLI
+    @State private var status: SubscriptionCLI.Status?
+    @State private var loginError: String?
+
+    var body: some View {
+        LabeledContent("Account:") {
+            HStack(spacing: 8) {
+                switch status {
+                case nil:
+                    ProgressView().controlSize(.small)
+                    Text("Checking…").foregroundStyle(.secondary)
+                case .signedIn:
+                    Label("Signed in", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case .signedOut:
+                    Label("Not signed in", systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.orange)
+                    Button("Sign In…", action: openLogin)
+                case .notInstalled:
+                    Label("\(cli.displayName) CLI not found", systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.orange)
+                    Link("Install…", destination: cli.installURL)
+                case .unknown:
+                    Label("Couldn't check sign-in", systemImage: "questionmark.circle")
+                        .foregroundStyle(.secondary)
+                    Button("Sign In…", action: openLogin)
+                }
+                Button("Check Again") { Task { await refresh() } }
+                    .disabled(status == nil)
+            }
+        }
+        .task(id: cli) { await refresh() }
+        .alert("Couldn't open Terminal", isPresented: Binding(get: { loginError != nil },
+                                                             set: { if !$0 { loginError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(loginError ?? "")
+        }
+    }
+
+    private func refresh() async {
+        status = nil
+        status = await cli.currentStatus()
+    }
+
+    private func openLogin() {
+        guard let script = cli.loginScript() else {
+            status = .notInstalled
+            return
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Kleio \(cli.displayName) Sign In.command")
+        do {
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+            guard NSWorkspace.shared.open(url) else { throw CocoaError(.fileReadUnknown) }
+        } catch {
+            loginError = "Run `\(cli.executableNames[0]) \(cli.loginArguments.joined(separator: " "))` in Terminal, then click Check Again."
         }
     }
 }

@@ -102,7 +102,7 @@ final class LibraryStore: ObservableObject {
         if let previous = self.document(id: document.id),
            let summary = previous.summary, !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            document.summary == previous.summary,
-           SummaryService.sourceText(document) != SummaryService.sourceText(previous) {
+           SummaryService.summarizedContent(document) != SummaryService.summarizedContent(previous) {
             document.summaryIsStale = true
         }
         do {

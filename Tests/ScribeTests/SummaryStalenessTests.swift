@@ -38,6 +38,22 @@ final class SummaryStalenessTests: XCTestCase {
         XCTAssertFalse(fixture.document.summaryIsStale == true)
     }
 
+    func testRenamingARecordingKeepsItsSummaryCurrent() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        var document = fixture.document
+        document.summary = "Current summary."
+        document.summaryIsStale = false
+        XCTAssertTrue(fixture.library.update(document))
+
+        document = try XCTUnwrap(fixture.library.document(id: fixture.id))
+        document.title = "Sept 23 - Meeting w/ Dan"
+        XCTAssertTrue(fixture.library.update(document))
+
+        XCTAssertEqual(fixture.document.title, "Sept 23 - Meeting w/ Dan")
+        XCTAssertFalse(fixture.document.summaryIsStale == true)
+    }
+
     func testSuccessfulSameTextRegenerationClearsStaleMarkerAndFailureDoesNot() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

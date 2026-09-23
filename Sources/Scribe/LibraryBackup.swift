@@ -10,7 +10,7 @@ enum LibraryBackup {
         "manualAutoStopEnabled", "recordingAppShortcuts", "recordingVideoEnabled", "recordingVideoMode",
         "textReplacementRules", "replacementCaseSensitive", "replacementWholeWords", "removeFillerWords",
         "dictationEnabled", "dictationCleanupEnabled", "dictationCleanupBackend", "dictationCleanupOllamaModel",
-        "aiProvider", "aiModel", "aiOllamaModel", "summaryPrompt", "watchAutoTranscribe", "watchAutoExport",
+        "aiProvider", "aiModel", "aiOllamaModel", "aiModel.claudeCode", "aiModel.codex", "aiModel.cursor", "summaryPrompt", "watchAutoTranscribe", "watchAutoExport",
         "watchExportFormats", "watchedFolders", "watchSeenSignatures", "calendarSyncEnabled", "calendarLeadMinutes",
         "calendarSelectedIDs", "calendarOnlyWithLinks", "autoRecordEnabled", "autoRecordCalendarIDs",
         "autoRecordLateJoinMinutes", "autoRecordGraceMinutes", "autoRecordSilenceMinutes", "autoRecordEventOverrides",
