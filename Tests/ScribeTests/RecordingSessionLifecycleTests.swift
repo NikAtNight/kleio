@@ -4,6 +4,61 @@ import XCTest
 
 @MainActor
 final class RecordingSessionLifecycleTests: XCTestCase {
+    func testCallPromptAudioChoiceBypassesSavedVideoPreference() async throws {
+        let defaults = UserDefaults.standard
+        let previous = defaults.object(forKey: "recordingVideoEnabled")
+        defaults.set(true, forKey: "recordingVideoEnabled")
+        defer {
+            if let previous { defaults.set(previous, forKey: "recordingVideoEnabled") }
+            else { defaults.removeObject(forKey: "recordingVideoEnabled") }
+        }
+        let fixture = try Fixture()
+        let driver = SyntheticCaptureDriver()
+        let session = fixture.session(driver: driver)
+        let app = RecordingApplication(bundleID: "test.call", name: "Test call")
+        await session.startUsingPreferences(mode: .meeting, library: fixture.library,
+                                            shortcut: app, videoMode: nil)
+        XCTAssertTrue(session.isRecording)
+        XCTAssertFalse(driver.events.contains("prepare-video"))
+        let document = try XCTUnwrap(fixture.library.document(id: XCTUnwrap(session.activeDocumentID)))
+        XCTAssertEqual(document.recordingAppBundleID, app.bundleID)
+        XCTAssertEqual(document.tracks.map(\.source), [.system, .microphone])
+        XCTAssertNil(document.videoTracks)
+        session.stop(library: fixture.library, queue: fixture.queue)
+        await session.waitForFinalization()
+    }
+
+    func testCallPromptScreenChoiceUsesDisplayPickerAndKeepsAppAudioTarget() async throws {
+        let fixture = try Fixture()
+        let driver = SyntheticCaptureDriver()
+        driver.videoResult = RecordingVideoStopResult(duration: 2, startOffset: 0)
+        let session = fixture.session(driver: driver)
+        let app = RecordingApplication(bundleID: "test.call", name: "Test call")
+        await session.startUsingPreferences(mode: .meeting, library: fixture.library,
+                                            shortcut: app, videoMode: .display)
+        XCTAssertTrue(session.isRecording)
+        XCTAssertEqual(driver.preparedVideoMode, .display)
+        let document = try XCTUnwrap(fixture.library.document(id: XCTUnwrap(session.activeDocumentID)))
+        XCTAssertEqual(document.recordingAppBundleID, app.bundleID)
+        XCTAssertEqual(document.tracks.map(\.source), [.system, .microphone])
+        XCTAssertEqual(document.videoTracks?.count, 1)
+        session.stop(library: fixture.library, queue: fixture.queue)
+        await session.waitForFinalization()
+    }
+
+    func testCallPromptScreenPickerCancellationCreatesNoRecording() async throws {
+        let fixture = try Fixture()
+        let driver = SyntheticCaptureDriver()
+        driver.videoPreparationError = CancellationError()
+        let session = fixture.session(driver: driver)
+        await session.startUsingPreferences(mode: .meeting, library: fixture.library,
+                                            shortcut: .init(bundleID: "test.call", name: "Test call"), videoMode: .display)
+        XCTAssertFalse(session.isBusy)
+        XCTAssertNil(session.lastError)
+        XCTAssertFalse(driver.events.contains("start"))
+        XCTAssertTrue(fixture.library.documents.isEmpty)
+    }
+
     func testMuteSyncRequiresAppTargetBeforeOpeningDevicesOrCreatingMedia() async throws {
         let fixture = try Fixture()
         let driver = SyntheticCaptureDriver()
@@ -377,6 +432,8 @@ private final class SyntheticCaptureDriver: RecordingCaptureDriving {
     var delayVideoStop = false
     var audioDuration: TimeInterval = 0
     var videoResult: RecordingVideoStopResult?
+    var preparedVideoMode: VideoCaptureMode?
+    var videoPreparationError: Error?
     var events: [String] = []
     var cancelStartCalled = false
     var muteSyncApplication: RecordingApplication?
@@ -396,6 +453,8 @@ private final class SyntheticCaptureDriver: RecordingCaptureDriving {
 
     func prepareVideo(_ mode: VideoCaptureMode) async throws {
         events.append("prepare-video")
+        preparedVideoMode = mode
+        if let videoPreparationError { throw videoPreparationError }
     }
 
     func start(

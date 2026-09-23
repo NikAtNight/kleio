@@ -133,4 +133,76 @@ final class MeetingMuteReaderTests: XCTestCase {
         XCTAssertEqual(Parser.Provider.native(bundleID: "us.zoom.xos"), .zoom)
         XCTAssertNil(Parser.Provider.native(bundleID: "evil.com.microsoft.teams2"))
     }
+
+    func testCallPresenceDoesNotDependOnMicrophoneState() {
+        for labels in [["Leave call"], ["Leave call", "Turn on microphone"], ["Leave call", "Turn off microphone"]] {
+            XCTAssertEqual(CallPresenceParser.parse(.init(contexts: [context(labels)]), isBrowser: true),
+                           .active(contextID: "opaque-call", name: "Google Meet call"))
+        }
+        let call = Parser.Context(id: "call", provider: .meet,
+                                  controls: [control("Leave call"), control("Turn off microphone", enabled: false)])
+        XCTAssertEqual(CallPresenceParser.parse(.init(contexts: [call]), isBrowser: true),
+                       .active(contextID: "call", name: "Google Meet call"))
+    }
+
+    func testCallPresenceRequiresUniqueEnabledJoinedCallControl() {
+        let cases: [[Parser.Context]] = [
+            [context(["Leave call", "Leave call"])],
+            [context(["Leave call"], id: "a"), context(["Leave call"], id: "b")],
+            [context(["Leave call"], id: "")],
+            [.init(id: "call", provider: .meet, controls: [control("Leave call", enabled: false)])],
+            [context(["Leave call", "Join now"])],
+            [context(["Leave call", "Ask to join"])],
+            [context(["Leave meeting", "Join audio"], provider: .zoom)]
+        ]
+        for contexts in cases {
+            XCTAssertEqual(CallPresenceParser.parse(.init(contexts: contexts), isBrowser: false), .unknown)
+        }
+    }
+
+    func testCallPresenceRequiresButtonRatherThanMatchingText() {
+        let call = Parser.Context(id: "call", provider: .meet,
+                                  controls: [.init(labels: ["Leave call"], enabled: true, role: "AXStaticText")])
+        XCTAssertEqual(CallPresenceParser.parse(.init(contexts: [call]), isBrowser: true), .unknown)
+    }
+
+    func testCallPresenceTreatsBrowserAbsenceAsUnknown() {
+        for contexts in [[], [context(["Turn off microphone"])], [context(["Join audio"])]] {
+            XCTAssertEqual(CallPresenceParser.parse(.init(contexts: contexts), isBrowser: true), .unknown)
+            XCTAssertEqual(CallPresenceParser.parse(.init(contexts: contexts), isBrowser: false), .inactive)
+        }
+        XCTAssertEqual(CallPresenceParser.parse(.init(contexts: [context(["Leave call"])], failure: "Read failed"), isBrowser: false), .unknown)
+    }
+
+    func testReadableBrowserPrejoinIdentifiesTheContextThatCanBeRearmed() {
+        XCTAssertEqual(CallPresenceParser.parse(.init(contexts: [context(["Join now"])]), isBrowser: true),
+                       .readyToJoin(contextID: "opaque-call"))
+        var disabled = context(["Join now"])
+        disabled.controls[0].enabled = false
+        XCTAssertEqual(CallPresenceParser.parse(.init(contexts: [disabled]), isBrowser: true), .unknown)
+    }
+
+    func testCallPresenceProviderLabelsAndFaceTimeCandidateControls() {
+        let providers: [(Parser.Provider, String, String)] = [
+            (.slack, "Leave huddle", "Slack Huddle"), (.teams, "Leave", "Teams call"),
+            (.zoom, "Leave meeting", "Zoom call"), (.meet, "Leave call", "Google Meet call"),
+            (.faceTime, "End call", "FaceTime call"), (.faceTime, "Hang up", "FaceTime call")
+        ]
+        for (provider, label, name) in providers {
+            XCTAssertEqual(CallPresenceParser.parse(.init(contexts: [context([label], provider: provider)]), isBrowser: false),
+                           .active(contextID: "opaque-call", name: name))
+        }
+        XCTAssertEqual(CallPresenceParser.parse(.init(contexts: [context(["Leave huddle"], provider: .teams)]), isBrowser: false), .inactive)
+    }
+
+    func testFaceTimeCallDetectionDoesNotEnableMuteReading() {
+        XCTAssertTrue(MeetingMuteReader.supportsCallDetection(bundleID: "com.apple.FaceTime"))
+        XCTAssertNil(Parser.Provider.native(bundleID: "com.apple.FaceTime"))
+        assertUnavailable(parse([context(["End call", "Mute yourself"], provider: .faceTime)]))
+        XCTAssertTrue(MeetingMuteReader.supportsCallDetection(bundleID: "com.google.Chrome"))
+        XCTAssertTrue(MeetingMuteReader.supportsCallDetection(bundleID: "com.microsoft.teams2"))
+        XCTAssertFalse(MeetingMuteReader.supportsCallDetection(bundleID: "evil.com.apple.FaceTime"))
+        XCTAssertFalse(MeetingMuteReader.supportsCallDetection(bundleID: "com.apple.Music"))
+    }
+
 }

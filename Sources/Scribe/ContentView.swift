@@ -735,10 +735,16 @@ struct RemoteSpeakerCountPicker: View {
 extension RecordingSession {
     func startUsingPreferences(mode: RecordingMode, library: LibraryStore, shortcut: RecordingApplication? = nil) async {
         let defaults = UserDefaults.standard
-        let microphoneName = defaults.string(forKey: "microphoneSpeakerName")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Me"
-        let count = defaults.integer(forKey: "expectedRemoteSpeakerCount")
         let videoMode = defaults.bool(forKey: "recordingVideoEnabled")
             ? VideoCaptureMode(rawValue: defaults.string(forKey: "recordingVideoMode") ?? "window") : nil
+        await startUsingPreferences(mode: mode, library: library, shortcut: shortcut, videoMode: videoMode)
+    }
+
+    func startUsingPreferences(mode: RecordingMode, library: LibraryStore, shortcut: RecordingApplication?,
+                               videoMode: VideoCaptureMode?) async {
+        let defaults = UserDefaults.standard
+        let microphoneName = defaults.string(forKey: "microphoneSpeakerName")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Me"
+        let count = defaults.integer(forKey: "expectedRemoteSpeakerCount")
         await start(mode: mode, library: library,
                     application: shortcut,
                     videoMode: videoMode,

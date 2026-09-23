@@ -65,6 +65,8 @@
 	</array>
 	<key>LSMultipleInstancesProhibited</key>
 	<true/>
+	<key>LSUIElement</key>
+	<true/>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>

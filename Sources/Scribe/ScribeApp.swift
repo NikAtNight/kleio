@@ -169,6 +169,7 @@ struct ScribeApp: App {
     @StateObject private var dictation = DictationController()
     @StateObject private var calendarSync = CalendarSync()
     @StateObject private var autoRecordArbiter = AutoRecordArbiter()
+    @StateObject private var callDetection = CallDetectionController()
 
     var body: some Scene {
         WindowGroup("Kleio", id: "main") {
@@ -224,6 +225,13 @@ struct ScribeApp: App {
                         library: library,
                         queue: queue
                     )
+                    callDetection.configure(recording: recording, library: library,
+                        presentationBlocked: {
+                            if case .countdown = autoRecordArbiter.phase { return true }
+                            return dictation.phase != .idle || backups.isWorking
+                        },
+                        didStart: { appState.select(document: $0) }
+                    )
                 }
                 .frame(minWidth: 940, minHeight: 560)
         }
@@ -253,11 +261,12 @@ struct ScribeApp: App {
         } label: {
             Image(systemName: recording.isRecording
                   ? "record.circle.fill"
-                  : (dictation.phase == .recording ? "mic.circle.fill" : "waveform"))
+                  : (dictation.phase == .recording ? "mic.circle.fill" : "scroll"))
         }
 
         Settings {
             SettingsView()
+                .environmentObject(callDetection)
                 .environmentObject(backups)
                 .environmentObject(library)
                 .environmentObject(recording)
@@ -307,7 +316,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        // Kleio lives in the menu bar. It only joins the Dock while a window
+        // is open, so closing the last window takes it back out of the Dock.
+        NSApp.setActivationPolicy(.accessory)
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(windowDidBecomeKey(_:)),
+                           name: NSWindow.didBecomeKeyNotification, object: nil)
+        center.addObserver(self, selector: #selector(windowWillClose(_:)),
+                           name: NSWindow.willCloseNotification, object: nil)
         NSApp.activate(ignoringOtherApps: true)
         if Bundle.main.bundleURL.pathExtension == "app" {
             let center = UNUserNotificationCenter.current()
@@ -365,6 +381,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Keep running for the menu bar quick-recorder.
         false
+    }
+
+    /// Windows that should put Kleio in the Dock: the main window, the
+    /// Settings window, and anything else the user can see. Menu bar popovers
+    /// and the call prompt panel are excluded.
+    private static func isDockWorthy(_ window: NSWindow) -> Bool {
+        window.isVisible && !(window is NSPanel) && window.level == .normal
+    }
+
+    @objc private func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, Self.isDockWorthy(window),
+              NSApp.activationPolicy() != .regular else { return }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        guard let closing = notification.object as? NSWindow, Self.isDockWorthy(closing) else { return }
+        let others = NSApp.windows.filter { $0 !== closing && Self.isDockWorthy($0) }
+        guard others.isEmpty, NSApp.activationPolicy() == .regular else { return }
+        NSApp.setActivationPolicy(.accessory)
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {

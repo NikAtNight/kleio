@@ -51,6 +51,7 @@ while IFS= read -r bundle_name; do
     [ -d "$APP/Contents/Resources/$bundle_name" ] || fail "$bundle_name is missing from Contents/Resources"
 done <<< "$REFERENCED_BUNDLES"
 
+# SwiftPM writes resource bundles flat or, on newer toolchains, under Contents/Resources.
 HUB_BUNDLE="$APP/Contents/Resources/swift-transformers_Hub.bundle"
 # SwiftPM writes resource bundles flat or under Contents/Resources depending on the toolchain.
 [ -d "$HUB_BUNDLE/Contents/Resources" ] && HUB_BUNDLE="$HUB_BUNDLE/Contents/Resources"

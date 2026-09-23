@@ -23,6 +23,8 @@ A native macOS meeting recorder with local transcription and speaker review. Req
 - Timestamped transcript editing, search/replace, waveform seeking, playback speed, and meeting notes.
 - Export to TXT, Markdown, HTML, SRT, VTT, CSV, JSON, or the clipboard.
 - Optional Calendar integration and automatic call recording with a visible countdown. See [the auto-record plan](docs/auto-record-plan.md).
+- Call prompts in the bottom-left corner with **Audio** and **Audio + screen** choices. Enable Accessibility access in Settings → General → Recording. Candidate readers cover Slack Huddles, Teams, Google Meet, Zoom, and FaceTime; live app detection remains unverified and hidden browser tabs may be unreadable. See [call detection](docs/flows/call-detection.md).
+- Menu bar app. Kleio only appears in the Dock while a window is open, and keeps recording, transcribing, and watching for calls after the last window closes. Reopen it from the menu bar scroll icon.
 - System-wide dictation with ⌥Space, optional local cleanup, and reusable replacement rules.
 - Watch folders with automatic transcription and export.
 - Optional summaries through Apple Intelligence or Ollama locally, or a cloud provider explicitly configured in Settings → AI.

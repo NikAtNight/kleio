@@ -320,6 +320,7 @@ struct WatchFolderSettings: View {
 }
 
 struct GeneralSettings: View {
+    @EnvironmentObject private var callDetection: CallDetectionController
     @AppStorage("language") private var language = ""
     @AppStorage("translate") private var translate = false
     @AppStorage("automaticSpeakerRecognition") private var automaticSpeakerRecognition = false
@@ -367,6 +368,13 @@ struct GeneralSettings: View {
             }
 
             Section("Recording") {
+                Toggle("Ask to record when a call is detected", isOn: $callDetection.enabled)
+                Text("Shows a bottom-left prompt with Audio and Audio + screen. Detection needs Accessibility access and readable call controls.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if callDetection.enabled && !callDetection.accessibilityGranted {
+                    Button("Open Accessibility Settings…") { callDetection.openAccessibilitySettings() }
+                }
                 Toggle("End meeting recordings when the call ends", isOn: $manualAutoStopEnabled)
 
                 Text("Applies to recordings you start yourself. Kleio stops after the meeting app closes or both sides stay silent for a few minutes.")

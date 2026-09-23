@@ -17,7 +17,7 @@ protocol MeetingMuteReading {
 /// Candidate English control labels. Live app acceptance is required before relying on them.
 enum MeetingMuteParser {
     enum Provider: Equatable {
-        case teams, slack, zoom, meet
+        case teams, slack, zoom, meet, faceTime
 
         static func native(bundleID: String) -> Self? {
             switch bundleID {
@@ -64,6 +64,9 @@ enum MeetingMuteParser {
             .init(state: .unavailable(reason), contextID: nil, sourceName: sourceName, observedAt: observedAt)
         }
         if let failure = snapshot.failure { return unavailable(failure) }
+        guard !snapshot.contexts.contains(where: { $0.provider == .faceTime }) else {
+            return unavailable("Automatic mute reading is unavailable for this app.")
+        }
         let joined = snapshot.contexts.filter { context in
             context.controls.contains { control in control.role == "AXButton" && control.enabled && control.labels.contains { isLeave($0, provider: context.provider) } }
         }
@@ -93,20 +96,21 @@ enum MeetingMuteParser {
                      readStartedAt: candidate.control.readStartedAt)
     }
 
-    private static func normalize(_ label: String) -> String {
+    static func normalize(_ label: String) -> String {
         // Accept a keyboard shortcut suffix without accepting arbitrary text after a label.
         let lower = label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard let range = lower.range(of: #"\s*\([⌘⇧⌥⌃a-z0-9 +]+\)$"#, options: .regularExpression) else { return lower }
         return String(lower[..<range.lowerBound])
     }
 
-    private static func isLeave(_ label: String, provider: Provider) -> Bool {
+    static func isLeave(_ label: String, provider: Provider) -> Bool {
         let label = normalize(label)
         switch provider {
         case .meet: return label == "leave call"
         case .teams: return ["leave", "leave call", "leave meeting", "hang up"].contains(label)
         case .slack: return label == "leave huddle"
         case .zoom: return ["leave", "leave meeting", "end meeting"].contains(label)
+        case .faceTime: return ["end call", "hang up"].contains(label)
         }
     }
 
@@ -121,6 +125,60 @@ enum MeetingMuteParser {
         if ["unmute your microphone", "unmute my microphone", "unmute my audio", "unmute yourself"].contains(label) { return .muted }
         if ["mute your microphone", "mute my microphone", "mute my audio", "mute yourself"].contains(label) { return .unmuted }
         return nil
+    }
+}
+
+enum CallPresence: Equatable, Sendable {
+    case active(contextID: String, name: String)
+    case inactive
+    case readyToJoin(contextID: String)
+    case unknown
+}
+
+/// Candidate call controls share the bounded AX snapshot used for mute reading.
+enum CallPresenceParser {
+    private static let prejoinLabels = ["join now", "join call", "join meeting", "join huddle", "join audio", "join with computer audio", "ask to join"]
+
+    static func parse(_ snapshot: MeetingMuteParser.Snapshot, isBrowser: Bool) -> CallPresence {
+        guard snapshot.failure == nil else { return .unknown }
+        let joined = snapshot.contexts.filter { context in
+            context.controls.contains { control in
+                control.role == "AXButton" && control.labels.contains {
+                    MeetingMuteParser.isLeave($0, provider: context.provider)
+                }
+            }
+        }
+        guard !joined.isEmpty else {
+            guard isBrowser else { return .inactive }
+            let ready = snapshot.contexts.filter { context in
+                !context.id.isEmpty && context.controls.contains { control in
+                    control.role == "AXButton" && control.enabled && control.labels.contains {
+                        // Joining audio can be offered within an existing call.
+                        ["join now", "join call", "join meeting", "join huddle", "ask to join"].contains(MeetingMuteParser.normalize($0))
+                    }
+                }
+            }
+            return ready.count == 1 ? .readyToJoin(contextID: ready[0].id) : .unknown
+        }
+        guard joined.count == 1, let context = joined.first, !context.id.isEmpty else { return .unknown }
+        let leave = context.controls.filter { control in
+            control.role == "AXButton" && control.labels.contains {
+                MeetingMuteParser.isLeave($0, provider: context.provider)
+            }
+        }
+        guard leave.count == 1, leave[0].enabled else { return .unknown }
+        guard !context.controls.contains(where: { control in
+            control.labels.contains { prejoinLabels.contains(MeetingMuteParser.normalize($0)) }
+        }) else { return .unknown }
+        let name: String
+        switch context.provider {
+        case .slack: name = "Slack Huddle"
+        case .teams: name = "Teams call"
+        case .meet: name = "Google Meet call"
+        case .zoom: name = "Zoom call"
+        case .faceTime: name = "FaceTime call"
+        }
+        return .active(contextID: context.id, name: name)
     }
 }
 
@@ -154,16 +212,34 @@ final class MeetingMuteReader: MeetingMuteReading {
     ]
     private static let controlRoles: Set<String> = ["AXButton", "AXCheckBox", "AXSwitch"]
 
+    static func supportsCallDetection(bundleID: String) -> Bool {
+        MeetingMuteParser.Provider.native(bundleID: bundleID) != nil
+            || bundleID == "com.apple.FaceTime" || browserBundles.contains(bundleID)
+    }
+
     func read(application: RecordingApplication) -> MeetingMuteObservation {
+        let snapshot = snapshot(application: application, forCallDetection: false)
+        let result = MeetingMuteParser.parse(snapshot, sourceName: application.name, observedAt: RecordingClock.now)
+        if case .unavailable = result.state { identities.removeAll(keepingCapacity: true) }
+        return result
+    }
+
+    func readCall(application: RecordingApplication) -> CallPresence {
+        let snapshot = snapshot(application: application, forCallDetection: true)
+        return CallPresenceParser.parse(snapshot, isBrowser: Self.browserBundles.contains(application.bundleID))
+    }
+
+    private func snapshot(application: RecordingApplication, forCallDetection: Bool) -> MeetingMuteParser.Snapshot {
         let startedAt = RecordingClock.now
         deadline = startedAt + 0.18
         visited = 0
-        func unavailable(_ reason: String) -> MeetingMuteObservation {
+        func unavailable(_ reason: String) -> MeetingMuteParser.Snapshot {
             nodes.removeAll(keepingCapacity: true)
-            identities.removeAll(keepingCapacity: true)
-            return MeetingMuteParser.parse(.init(contexts: [], failure: reason), sourceName: application.name, observedAt: RecordingClock.now)
+            if !forCallDetection { identities.removeAll(keepingCapacity: true) }
+            return .init(contexts: [], failure: reason)
         }
-        let nativeProvider = MeetingMuteParser.Provider.native(bundleID: application.bundleID)
+        let nativeProvider: MeetingMuteParser.Provider? = forCallDetection && application.bundleID == "com.apple.FaceTime"
+            ? .faceTime : MeetingMuteParser.Provider.native(bundleID: application.bundleID)
         let isBrowser = Self.browserBundles.contains(application.bundleID)
         guard nativeProvider != nil || isBrowser else {
             return unavailable("Automatic mute reading is unavailable for this app.")
@@ -192,10 +268,16 @@ final class MeetingMuteReader: MeetingMuteReading {
                 }
             }
             try checkBudget()
-            identities = currentIdentities
-            let result = MeetingMuteParser.parse(.init(contexts: contexts), sourceName: application.name, observedAt: RecordingClock.now)
-            if case .unavailable = result.state { identities.removeAll(keepingCapacity: true) }
-            return result
+            if forCallDetection {
+                // Retain hidden browser contexts across unreadable or unrelated foreground tabs.
+                let retained = identities.filter { previous in
+                    !currentIdentities.contains { $0.token == previous.token }
+                }
+                identities = Array((currentIdentities + retained).prefix(128))
+            } else {
+                identities = currentIdentities
+            }
+            return .init(contexts: contexts)
         } catch {
             return unavailable("Meeting controls are unreadable or exceeded the read time limit.")
         }
