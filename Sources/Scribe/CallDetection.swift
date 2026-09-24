@@ -152,6 +152,8 @@ final class CallDetectionController: ObservableObject {
     private var prompt: CallRecordingPrompt?
     private var visibleCall: DetectedCall?
     private var promptError: String?
+    private var latestPresence: [String: CallPresence] = [:]
+    private var latestPresenceTime: TimeInterval?
     private weak var recording: RecordingSession?
     private weak var library: LibraryStore?
     private var presentationBlocked: () -> Bool = { true }
@@ -177,6 +179,12 @@ final class CallDetectionController: ObservableObject {
         Task { await poll() }
     }
 
+    /// The latest call read for a running app. Nil when detection is off or hasn't read it recently.
+    func presence(for bundleID: String) -> CallPresence? {
+        guard let latestPresenceTime, RecordingClock.now - latestPresenceTime <= 6 else { return nil }
+        return latestPresence[bundleID]
+    }
+
     func openAccessibilitySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
         NSWorkspace.shared.open(url)
@@ -193,6 +201,9 @@ final class CallDetectionController: ObservableObject {
         }
         let samples = await scanner.scan(applications, debug: debugLogging)
         guard enabled, AXIsProcessTrusted(), !starting else { hidePrompt(); return }
+        latestPresence = Dictionary(samples.map { ($0.application.bundleID, $0.presence) },
+                                    uniquingKeysWith: { first, _ in first })
+        latestPresenceTime = RecordingClock.now
         let call = core.update(samples, at: RecordingClock.now,
                                recordingBusy: recording.isBusy || library.hasPendingRecordingSaves,
                                presentationBlocked: presentationBlocked())

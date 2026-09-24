@@ -85,7 +85,7 @@ final class RecordingSessionLifecycleTests: XCTestCase {
         func update(after seconds: TimeInterval) -> [ManualAutoStopCommand] {
             core.update(now: start.addingTimeInterval(seconds), enabled: true, recording: session.activeRecording,
                         isPaused: false, elapsed: seconds, conferencingProcessBundleIDs: [],
-                        systemAudioActive: false, micAudioActive: false, silenceMinutes: 3)
+                        systemAudioActive: false, micAudioActive: false, silenceMinutes: 3, callPresence: nil)
         }
         XCTAssertEqual(update(after: 0), [])
         XCTAssertEqual(update(after: 179), [])

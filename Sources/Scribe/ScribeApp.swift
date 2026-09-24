@@ -228,7 +228,8 @@ struct ScribeApp: App {
                         recording: recording,
                         library: library,
                         queue: queue,
-                        startBlocked: { dictation.phase != .idle || backups.isWorking }
+                        startBlocked: { dictation.phase != .idle || backups.isWorking },
+                        callPresence: { callDetection.presence(for: $0) }
                     )
                     callDetection.configure(recording: recording, library: library,
                         presentationBlocked: {

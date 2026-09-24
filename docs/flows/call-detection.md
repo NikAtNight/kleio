@@ -23,9 +23,13 @@ Tests selected for these boundaries are `CallPromptTests`, `MeetingMuteReaderTes
 
 The reader reads every window in `AXWindows` plus `AXMainWindow` and `AXFocusedWindow`, de-duplicated. Windows on another Space are missing from `AXWindows`, and a full-screen meeting Space can hide the meeting window while the main window stays visible. macOS only sometimes reports the main window of an app on another Space. On September 23, 2026, Slack and Teams on another Space returned no main or focused window either, so a call there still reads as unknown.
 
-`CallPromptCore` confirms presence, handles ambiguity, and remembers the latest 128 dismissed contexts per application. Explicit enabled browser join controls produce `readyToJoin` for that context; missing controls alone remain unknown. `CallRecordingPrompt` hosts the SwiftUI buttons in a nonactivating AppKit panel, 20 points from the bottom-left of the pointer's display's usable area. It works independently of the main window and joins Spaces. The screen-recording choice is display capture; the existing Home flow still offers window capture.
+`CallPromptCore` confirms presence, handles ambiguity, and remembers the latest 128 dismissed contexts per application. Explicit enabled browser join controls produce `readyToJoin` for that context; missing controls alone remain unknown. `CallRecordingPrompt` hosts the SwiftUI buttons in a nonactivating AppKit panel at status-bar level, so it sits above other apps' floating call windows, 20 points from the bottom-left of the pointer's display's usable area. It works independently of the main window and joins Spaces. The screen-recording choice is display capture; the existing Home flow still offers window capture.
 
 After a click, the controller rechecks presence and calls the explicit-video overload of `RecordingSession.startUsingPreferences`. Both the Home path and prompt share speaker and mute preferences. Capture, permission handling, app-only audio resolution, persistence, and cancellation remain in `RecordingSession`. Startup never falls back to all system audio when app resolution fails. Successful startup selects the recording in Kleio without activating the main window.
+
+## Ending recordings when the call ends
+
+With "End meeting recordings when the call ends" on, `AutoRecordArbiter` passes the recorded app's latest call read from `CallDetectionController.presence(for:)` to `ManualAutoStopCore`. Once that app has read as active during the recording, 15 seconds of `inactive` or `readyToJoin` reads stop it. An `unknown` read, a pause, or a read older than 6 seconds restarts the wait, so a call window on another Space never counts as ended. This needs call detection on and Accessibility access. The existing app-quit and silence rules still apply after two minutes.
 
 ## Read limits
 

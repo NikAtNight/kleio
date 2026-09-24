@@ -377,7 +377,7 @@ struct GeneralSettings: View {
                 }
                 Toggle("End meeting recordings when the call ends", isOn: $manualAutoStopEnabled)
 
-                Text("Applies to recordings you start yourself. Kleio stops after the meeting app closes or both sides stay silent for a few minutes.")
+                Text("Applies to recordings you start yourself. Kleio stops about 15 seconds after you leave the call (needs call detection above), when the meeting app closes, or when both sides stay silent for a few minutes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

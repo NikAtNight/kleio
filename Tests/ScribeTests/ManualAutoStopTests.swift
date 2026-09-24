@@ -113,6 +113,55 @@ final class ManualAutoStopTests: XCTestCase {
         )
     }
 
+    func testStopsShortlyAfterTheDetectedCallEnds() {
+        var core = ManualAutoStopCore()
+        let teams = RecordingApplication(bundleID: "com.microsoft.teams2", name: "Microsoft Teams")
+        let recording = ActiveRecording(mode: .meeting, origin: .manual, application: teams)
+        let joined = CallPresence.active(contextID: "meeting", name: "Teams Meeting")
+        _ = update(&core, at: origin, recording: recording, elapsed: 0, processes: [teams.bundleID],
+                   systemAudioActive: true, call: joined)
+
+        // Teams keeps running after the call, and a short call is still under two minutes.
+        XCTAssertEqual(update(&core, at: origin.addingTimeInterval(60), recording: recording, elapsed: 60,
+                              processes: [teams.bundleID], call: .inactive), [])
+        XCTAssertEqual(update(&core, at: origin.addingTimeInterval(74), recording: recording, elapsed: 74,
+                              processes: [teams.bundleID], call: .inactive), [])
+        XCTAssertEqual(update(&core, at: origin.addingTimeInterval(75), recording: recording, elapsed: 75,
+                              processes: [teams.bundleID], call: .inactive), [.stopRecording])
+        XCTAssertEqual(update(&core, at: origin.addingTimeInterval(80), recording: recording, elapsed: 80,
+                              processes: [teams.bundleID], call: .inactive), [])
+    }
+
+    func testCallEndNeedsAJoinedCallAndSteadyReads() {
+        let slack = RecordingApplication(bundleID: "com.tinyspeck.slackmacgap", name: "Slack")
+        let recording = ActiveRecording(mode: .meeting, origin: .manual, application: slack)
+        let joined = CallPresence.active(contextID: "huddle", name: "Slack Huddle")
+
+        // Recording before joining: the missing leave button is not an ended call.
+        var beforeJoin = ManualAutoStopCore()
+        for second in stride(from: 0, through: 60, by: 2) {
+            XCTAssertEqual(update(&beforeJoin, at: origin.addingTimeInterval(TimeInterval(second)), recording: recording,
+                                  elapsed: TimeInterval(second), processes: [slack.bundleID],
+                                  systemAudioActive: true, call: .inactive), [])
+        }
+
+        // An unreadable window restarts the wait, and so does a paused recording.
+        var core = ManualAutoStopCore()
+        _ = update(&core, at: origin, recording: recording, elapsed: 0, processes: [slack.bundleID], call: joined)
+        _ = update(&core, at: origin.addingTimeInterval(2), recording: recording, elapsed: 2,
+                   processes: [slack.bundleID], systemAudioActive: true, call: .inactive)
+        _ = update(&core, at: origin.addingTimeInterval(10), recording: recording, elapsed: 10,
+                   processes: [slack.bundleID], systemAudioActive: true, call: .unknown)
+        XCTAssertEqual(update(&core, at: origin.addingTimeInterval(20), recording: recording, elapsed: 20,
+                              processes: [slack.bundleID], systemAudioActive: true, call: .inactive), [])
+        _ = update(&core, at: origin.addingTimeInterval(30), recording: recording, paused: true, elapsed: 30,
+                   processes: [slack.bundleID], call: .inactive)
+        XCTAssertEqual(update(&core, at: origin.addingTimeInterval(40), recording: recording, elapsed: 30,
+                              processes: [slack.bundleID], systemAudioActive: true, call: .inactive), [])
+        XCTAssertEqual(update(&core, at: origin.addingTimeInterval(55), recording: recording, elapsed: 45,
+                              processes: [slack.bundleID], systemAudioActive: true, call: .inactive), [.stopRecording])
+    }
+
     private func update(
         _ core: inout ManualAutoStopCore,
         at now: Date,
@@ -122,7 +171,8 @@ final class ManualAutoStopTests: XCTestCase {
         elapsed: TimeInterval,
         processes: Set<String> = [],
         systemAudioActive: Bool = false,
-        micAudioActive: Bool = false
+        micAudioActive: Bool = false,
+        call: CallPresence? = nil
     ) -> [ManualAutoStopCommand] {
         core.update(
             now: now,
@@ -133,7 +183,8 @@ final class ManualAutoStopTests: XCTestCase {
             conferencingProcessBundleIDs: processes,
             systemAudioActive: systemAudioActive,
             micAudioActive: micAudioActive,
-            silenceMinutes: 3
+            silenceMinutes: 3,
+            callPresence: call
         )
     }
 }

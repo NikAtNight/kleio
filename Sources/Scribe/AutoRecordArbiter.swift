@@ -65,8 +65,13 @@ enum ManualAutoStopCommand: Equatable {
 }
 
 struct ManualAutoStopCore {
+    /// How long the recorded app must show no joined call before the recording stops.
+    static let callEndDelay: TimeInterval = 15
+
     private var silenceSince: Date?
     private var pausedAt: Date?
+    private var sawCall = false
+    private var callEndedSince: Date?
     private var didRequestStop = false
 
     mutating func update(
@@ -78,7 +83,8 @@ struct ManualAutoStopCore {
         conferencingProcessBundleIDs: Set<String>,
         systemAudioActive: Bool,
         micAudioActive: Bool,
-        silenceMinutes: Int
+        silenceMinutes: Int,
+        callPresence: CallPresence?
     ) -> [ManualAutoStopCommand] {
         // Auto-record stops the recordings it started. Every other meeting recording,
         // including Join & Record, follows these rules.
@@ -89,6 +95,7 @@ struct ManualAutoStopCore {
 
         if isPaused {
             if pausedAt == nil { pausedAt = now }
+            callEndedSince = nil
             return []
         }
         if let pausedAt {
@@ -104,9 +111,25 @@ struct ManualAutoStopCore {
             silenceSince = nil
         }
 
+        // Call detection saw this app in a call, and now its leave control is gone.
+        switch callPresence {
+        case .active:
+            sawCall = true
+            callEndedSince = nil
+        case .inactive, .readyToJoin:
+            if sawCall, callEndedSince == nil { callEndedSince = now }
+        case .unknown, nil:
+            // Unreadable controls, such as a call window on another Space, aren't an ended call.
+            callEndedSince = nil
+        }
+        if !didRequestStop, let callEndedSince, now.timeIntervalSince(callEndedSince) >= Self.callEndDelay {
+            didRequestStop = true
+            return [.stopRecording]
+        }
+
         guard elapsed >= 2 * 60, !didRequestStop else { return [] }
 
-        // Only the recorded app quitting ends the call. A browser or all-Mac-audio
+        // Otherwise only the recorded app quitting ends the call. A browser or all-Mac-audio
         // recording has no app that quits with the call, so it relies on silence.
         if let bundleID = recording.application?.bundleID,
            AudioProcessMonitor.isCallApp(bundleID),
@@ -126,6 +149,8 @@ struct ManualAutoStopCore {
     private mutating func reset() {
         silenceSince = nil
         pausedAt = nil
+        sawCall = false
+        callEndedSince = nil
         didRequestStop = false
     }
 }
@@ -381,6 +406,7 @@ final class AutoRecordArbiter: ObservableObject {
     private var isConfigured = false
     private var startInProgress = false
     private var startBlocked: () -> Bool = { true }
+    private var callPresence: (String) -> CallPresence? = { _ in nil }
     private var loggedStartWait = false
 
     func configure(
@@ -388,11 +414,13 @@ final class AutoRecordArbiter: ObservableObject {
         recording: RecordingSession,
         library: LibraryStore,
         queue: TranscriptionQueue,
-        startBlocked: @escaping () -> Bool
+        startBlocked: @escaping () -> Bool,
+        callPresence: @escaping (String) -> CallPresence?
     ) {
         guard !isConfigured else { return }
         isConfigured = true
         self.startBlocked = startBlocked
+        self.callPresence = callPresence
         self.calendarSync = calendarSync
         self.recording = recording
         self.library = library
@@ -464,7 +492,8 @@ final class AutoRecordArbiter: ObservableObject {
             conferencingProcessBundleIDs: processMonitor.runningCallAppBundleIDs(),
             systemAudioActive: recordingSystemActive,
             micAudioActive: recordingMicActive,
-            silenceMinutes: calendarSync.autoRecordSilenceMinutes
+            silenceMinutes: calendarSync.autoRecordSilenceMinutes,
+            callPresence: activeRecording?.application.flatMap { callPresence($0.bundleID) }
         )
         if startBlocked, case .countdown(let event, let deadline) = core.phase, now >= deadline {
             if !loggedStartWait {
