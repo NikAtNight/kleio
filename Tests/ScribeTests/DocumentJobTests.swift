@@ -4,6 +4,32 @@ import XCTest
 
 @MainActor
 final class DocumentJobTests: XCTestCase {
+    func testAutomaticExportFailureKeepsSavedTranscriptAndRetriesWithoutInference() async throws {
+        let fixture = try JobFixture()
+        defer { fixture.remove() }
+        let engine = FixtureTranscriber()
+        var shouldFail = true
+        var exports = 0
+        let queue = makeQueue(fixture, engine: engine, export: { _ in
+            exports += 1
+            if shouldFail { throw CocoaError(.fileWriteNoPermission) }
+        })
+        queue.enqueue(fixture.id)
+        try await waitFor { !queue.isBusy }
+        XCTAssertEqual(fixture.reopenedDocument()?.status, .ready)
+        XCTAssertFalse(fixture.document.segments.isEmpty)
+        XCTAssertTrue(queue.automaticExportErrors[fixture.id]?.contains("transcript was saved") == true)
+        XCTAssertTrue(queue.pendingSaveIDs.isEmpty)
+        let initialDecodes = await engine.decodes
+        shouldFail = false
+        queue.retryAutomaticExport(fixture.id)
+        XCTAssertEqual(exports, 2)
+        XCTAssertNil(queue.automaticExportErrors[fixture.id])
+        let finalDecodes = await engine.decodes
+        XCTAssertEqual(finalDecodes, initialDecodes)
+        XCTAssertFalse(queue.isBusy)
+    }
+
     func testEnqueueSaveFailureDoesNoModelWorkAndCanRetry() async throws {
         let fixture = try JobFixture()
         defer { fixture.remove() }
@@ -371,7 +397,7 @@ final class DocumentJobTests: XCTestCase {
 
     private func makeQueue(_ fixture: JobFixture, engine: FixtureTranscriber = FixtureTranscriber(),
                            inference: InferenceCounter = InferenceCounter(),
-                           export: @escaping (ScribeDocument) -> Void = { _ in }) -> TranscriptionQueue {
+                           export: @escaping (ScribeDocument) throws -> Void = { _ in }) -> TranscriptionQueue {
         let queue = TranscriptionQueue(transcriber: engine,
                                        inferSpeakers: { _, _, _ in try await inference.run() },
                                        exportAutomatically: export)

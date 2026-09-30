@@ -41,13 +41,14 @@ enum SummaryService {
             case .anthropic, .openai, .appleIntelligence, .ollama: return nil
             }
         }
-        /// Each CLI keeps its own model so switching providers doesn't pass
-        /// one company's model name to another's tool.
+        var usesAPIKey: Bool { self == .anthropic || self == .openai }
+
+        /// Provider-specific preferences keep model names with their vendor.
         var modelDefaultsKey: String {
             switch self {
-            case .anthropic, .openai, .appleIntelligence: return "aiModel"
+            case .appleIntelligence: return "aiModel.appleIntelligence"
             case .ollama: return "aiOllamaModel"
-            case .claudeCode, .codex, .cursor: return "aiModel.\(rawValue)"
+            case .anthropic, .openai, .claudeCode, .codex, .cursor: return "aiModel.\(rawValue)"
             }
         }
     }
@@ -110,44 +111,31 @@ enum SummaryService {
     }
 
     static var provider: Provider {
-        Provider(rawValue: UserDefaults.standard.string(forKey: "aiProvider") ?? "") ?? .anthropic
-    }
-
-    static var apiKey: String {
-        UserDefaults.standard.string(forKey: "aiAPIKey") ?? ""
+        SummarySettings().provider
     }
 
     static var model: String {
-        let stored = UserDefaults.standard.string(forKey: provider.modelDefaultsKey) ?? ""
-        return stored.isEmpty ? provider.defaultModel : stored
+        let settings = SummarySettings()
+        return settings.model(for: settings.provider)
     }
 
     static var prompt: String {
-        let stored = UserDefaults.standard.string(forKey: "summaryPrompt") ?? ""
-        return stored.isEmpty ? defaultPrompt : stored
+        SummarySettings().prompt
     }
 
     static var isConfigured: Bool {
-        switch provider {
-        case .anthropic, .openai:
-            return !apiKey.isEmpty
-        case .appleIntelligence:
-            return true
-        case .ollama:
-            return !model.isEmpty
-        case .claudeCode, .codex, .cursor:
-            return provider.subscriptionCLI?.executableURL() != nil
-        }
+        (try? SummarySettings().configuration().isConfigured) ?? false
     }
 
-    static func summarize(_ doc: ScribeDocument) async throws -> String {
-        guard isConfigured else { throw SummaryError.noKey }
+    static func summarize(_ doc: ScribeDocument, settings: SummarySettings = SummarySettings()) async throws -> String {
         // Keep the provider fixed for every part of this request, even if
         // Settings changes while a long transcript is being processed.
-        let selectedProvider = provider
-        let selectedModel = model
-        let selectedKey = apiKey
-        let selectedPrompt = prompt
+        let configuration = try settings.configuration()
+        guard configuration.isConfigured else { throw SummaryError.noKey }
+        let selectedProvider = configuration.provider
+        let selectedModel = configuration.model
+        let selectedKey = configuration.apiKey
+        let selectedPrompt = configuration.prompt
         if selectedProvider == .ollama, !supportsSummaries(model: selectedModel) {
             throw SummaryError.unsuitableModel
         }

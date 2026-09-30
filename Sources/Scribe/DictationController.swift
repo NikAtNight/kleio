@@ -37,12 +37,19 @@ final class DictationController: ObservableObject {
     private var targetApplication: NSRunningApplication?
     private var dictationHUD: DictationHUD?
     private let transcriber = Transcriber()
+    private let defaults: UserDefaults
+    private let requestMicrophonePermission: () async -> Bool
+    private var startAttempt: UUID?
+    var startBlockReason: () -> String? = { nil }
     private lazy var hotKey = GlobalHotKey { [weak self] in
         Task { @MainActor in self?.toggle() }
     }
 
-    init() {
-        enabled = UserDefaults.standard.bool(forKey: "dictationEnabled")
+    init(defaults: UserDefaults = .standard,
+         requestMicrophonePermission: @escaping () async -> Bool = MicRecorder.requestPermission) {
+        self.defaults = defaults
+        self.requestMicrophonePermission = requestMicrophonePermission
+        enabled = defaults.bool(forKey: "dictationEnabled")
     }
 
     var statusText: String {
@@ -71,7 +78,7 @@ final class DictationController: ObservableObject {
 
     func setEnabled(_ newValue: Bool, promptForAccessibility: Bool = false) {
         enabled = newValue
-        UserDefaults.standard.set(newValue, forKey: "dictationEnabled")
+        defaults.set(newValue, forKey: "dictationEnabled")
         if newValue {
             if promptForAccessibility { requestAccessibility() }
             if !hotKey.register() {
@@ -82,7 +89,7 @@ final class DictationController: ObservableObject {
                     : "Dictation enabled; results will copy until Accessibility is allowed"
             }
         } else {
-            if phase == .recording { cancelRecording() }
+            if phase == .preparing || phase == .recording { cancelRecording() }
             hotKey.unregister()
             lastMessage = nil
         }
@@ -111,6 +118,7 @@ final class DictationController: ObservableObject {
     }
 
     func cancelRecording() {
+        startAttempt = nil
         recorder?.stop()
         recorder = nil
         if let recordingURL { try? FileManager.default.removeItem(at: recordingURL) }
@@ -132,15 +140,21 @@ final class DictationController: ObservableObject {
     }
 
     private func startRecording() {
+        if let reason = startBlockReason() { lastMessage = reason; return }
         guard recordingSession?.isBusy != true else {
             lastMessage = "Finish the active recording before starting dictation"
             return
         }
         phase = .preparing
+        let attempt = UUID()
+        startAttempt = attempt
         lastMessage = nil
         targetApplication = NSWorkspace.shared.frontmostApplication
         Task {
-            guard await MicRecorder.requestPermission() else {
+            let allowed = await requestMicrophonePermission()
+            guard startAttempt == attempt else { return }
+            startAttempt = nil
+            guard allowed else {
                 phase = .idle
                 lastMessage = MicRecorder.MicError.permissionDenied.localizedDescription
                 return
@@ -150,12 +164,17 @@ final class DictationController: ObservableObject {
                 lastMessage = "Finish the active recording before starting dictation"
                 return
             }
+            if let reason = startBlockReason() {
+                phase = .idle
+                lastMessage = reason
+                return
+            }
             do {
                 let directory = ModelManager.downloadBase.appendingPathComponent("Dictation", isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let url = directory.appendingPathComponent("dictation-\(UUID().uuidString).caf")
                 let recorder = MicRecorder()
-                try recorder.start(writingTo: url) { [weak self] level in
+                try recorder.start(writingTo: url) { [weak self = self] level in
                     Task { @MainActor in self?.level = level }
                 }
                 self.recorder = recorder
@@ -233,7 +252,7 @@ final class DictationController: ObservableObject {
         // Give the target app a beat to regain key focus before the synthetic
         // ⌘V lands, otherwise the paste can hit the wrong app.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            TextInjector.inject(text) { [weak self] landed in
+            TextInjector.inject(text) { [weak self = self] landed in
                 guard let self else { return }
                 phase = .idle
                 lastMessage = landed

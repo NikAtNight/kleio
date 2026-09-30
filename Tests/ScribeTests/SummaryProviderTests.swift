@@ -4,53 +4,47 @@ import XCTest
 
 final class SummaryProviderTests: XCTestCase {
     private let providerKey = "aiProvider"
-    private let apiKeyKey = "aiAPIKey"
-    private let modelKey = "aiModel"
     private let ollamaModelKey = "aiOllamaModel"
-    private var savedDefaults: [String: Any] = [:]
+    private var defaults: UserDefaults!
+    private var domain: String!
+    private var credentials: TestSummaryCredentialStore!
+    private var settings: SummarySettings!
 
     override func setUp() {
         super.setUp()
-        for key in [providerKey, apiKeyKey, modelKey, ollamaModelKey] {
-            if let value = UserDefaults.standard.object(forKey: key) {
-                savedDefaults[key] = value
-            }
-        }
+        domain = "test.summary-provider.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: domain)!
+        credentials = TestSummaryCredentialStore()
+        settings = SummarySettings(defaults: defaults, credentials: credentials)
     }
 
     override func tearDown() {
-        for key in [providerKey, apiKeyKey, modelKey, ollamaModelKey] {
-            if let value = savedDefaults[key] {
-                UserDefaults.standard.set(value, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
+        defaults.removePersistentDomain(forName: domain)
         URLProtocolStub.handler = nil
         super.tearDown()
     }
 
-    func testConfigurationDependsOnSelectedProvider() {
-        UserDefaults.standard.set("anthropic", forKey: providerKey)
-        UserDefaults.standard.set("", forKey: apiKeyKey)
-        XCTAssertFalse(SummaryService.isConfigured)
+    func testConfigurationDependsOnSelectedProvider() throws {
+        defaults.set("anthropic", forKey: providerKey)
+        XCTAssertFalse(try settings.configuration().isConfigured)
 
-        UserDefaults.standard.set("test-key", forKey: apiKeyKey)
-        XCTAssertTrue(SummaryService.isConfigured)
+        try settings.saveAPIKey("anthropic-key", for: .anthropic)
+        XCTAssertTrue(try settings.configuration().isConfigured)
 
-        UserDefaults.standard.set("openai", forKey: providerKey)
-        XCTAssertTrue(SummaryService.isConfigured)
+        defaults.set("openai", forKey: providerKey)
+        XCTAssertFalse(try settings.configuration().isConfigured)
+        try settings.saveAPIKey("openai-key", for: .openai)
+        XCTAssertTrue(try settings.configuration().isConfigured)
 
-        UserDefaults.standard.set("appleIntelligence", forKey: providerKey)
-        UserDefaults.standard.set("", forKey: apiKeyKey)
-        XCTAssertTrue(SummaryService.isConfigured)
+        defaults.set("appleIntelligence", forKey: providerKey)
+        XCTAssertTrue(try settings.configuration().isConfigured)
 
-        UserDefaults.standard.set("ollama", forKey: providerKey)
-        UserDefaults.standard.set("", forKey: ollamaModelKey)
-        XCTAssertFalse(SummaryService.isConfigured)
+        defaults.set("ollama", forKey: providerKey)
+        defaults.set("", forKey: ollamaModelKey)
+        XCTAssertFalse(try settings.configuration().isConfigured)
 
-        UserDefaults.standard.set("llama3.2", forKey: ollamaModelKey)
-        XCTAssertTrue(SummaryService.isConfigured)
+        defaults.set("llama3.2", forKey: ollamaModelKey)
+        XCTAssertTrue(try settings.configuration().isConfigured)
     }
 
     func testOllamaGenerationDecodesResponseAndSendsPlainPrompt() async throws {
@@ -103,11 +97,11 @@ final class SummaryProviderTests: XCTestCase {
     }
 
     func testSummaryRejectsDictationModelBeforeSendingARequest() async {
-        UserDefaults.standard.set("ollama", forKey: providerKey)
-        UserDefaults.standard.set("s1-mini:latest", forKey: ollamaModelKey)
+        defaults.set("ollama", forKey: providerKey)
+        defaults.set("s1-mini:latest", forKey: ollamaModelKey)
         let document = ScribeDocument(title: "Test", kind: .recording, status: .ready)
         do {
-            _ = try await SummaryService.summarize(document)
+            _ = try await SummaryService.summarize(document, settings: settings)
             XCTFail("A cleanup model must not receive summary requests")
         } catch SummaryService.SummaryError.unsuitableModel {
         } catch {

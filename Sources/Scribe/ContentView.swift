@@ -8,6 +8,7 @@ struct ContentView: View {
     @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var dictation: DictationController
+    @EnvironmentObject private var importer: Importer
     @StateObject private var playback = PlaybackController()
 
     @State private var searchText = ""
@@ -20,6 +21,14 @@ struct ContentView: View {
         } detail: {
             detail
                 .safeAreaInset(edge: .top, spacing: 0) {
+                    if importer.isBusy {
+                        HStack {
+                            ProgressView().controlSize(.small)
+                            Text("Importing files, \(importer.completedFiles) of \(importer.totalFiles) finished")
+                            Spacer()
+                        }
+                        .font(.callout).padding(12).background(.bar)
+                    }
                     DocumentJobStatusView()
                     if recording.isRecording || recording.isFinalizing || recording.hasPendingSave {
                         RecordingStatusBar()
@@ -67,13 +76,16 @@ struct ContentView: View {
             allowsMultipleSelection: true
         ) { result in
             if case .success(let urls) = result {
-                switch appState.importMode {
-                case .files:
-                    let ids = Importer.importFiles(urls, library: library, queue: queue)
-                    if let first = ids.first { appState.select(document: first) }
-                case .podcast:
-                    if let id = Importer.importPodcast(urls, library: library, queue: queue) {
-                        appState.select(document: id)
+                let mode = appState.importMode
+                Task {
+                    switch mode {
+                    case .files:
+                        let ids = await importer.importFiles(urls, library: library, queue: queue)
+                        if let first = ids.first { appState.select(document: first) }
+                    case .podcast:
+                        if let id = await importer.importPodcast(urls, library: library, queue: queue) {
+                            appState.select(document: id)
+                        }
                     }
                 }
             }
@@ -99,6 +111,14 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(recording.lastError ?? "")
+        }
+        .alert("Import Problem", isPresented: Binding(
+            get: { !importer.errors.isEmpty },
+            set: { if !$0 { importer.dismissErrors() } }
+        )) {
+            Button("OK", role: .cancel) { importer.dismissErrors() }
+        } message: {
+            Text(importer.errors.joined(separator: "\n"))
         }
     }
 
@@ -130,22 +150,20 @@ struct ContentView: View {
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        var found = false
-        let group = DispatchGroup()
-        var urls: [URL] = []
-        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-            found = true
-            group.enter()
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+        let files = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !files.isEmpty else { return false }
+        Task { @MainActor in
+            var urls: [URL] = []
+            for provider in files {
+                let url: URL? = await withCheckedContinuation { continuation in
+                    _ = provider.loadObject(ofClass: URL.self) { url, _ in continuation.resume(returning: url) }
+                }
                 if let url { urls.append(url) }
-                group.leave()
             }
-        }
-        group.notify(queue: .main) {
-            let ids = Importer.importFiles(urls, library: library, queue: queue)
+            let ids = await importer.importFiles(urls, library: library, queue: queue)
             if let first = ids.first { appState.select(document: first) }
         }
-        return found
+        return true
     }
 }
 

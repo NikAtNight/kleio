@@ -541,8 +541,8 @@ struct ModelRow: View {
 
 struct AISettings: View {
     @AppStorage("aiProvider") private var provider = SummaryService.Provider.anthropic.rawValue
-    @AppStorage("aiAPIKey") private var apiKey = ""
-    @AppStorage("aiModel") private var model = ""
+    @AppStorage("aiModel.anthropic") private var anthropicModel = ""
+    @AppStorage("aiModel.openai") private var openaiModel = ""
     @AppStorage("aiOllamaModel") private var ollamaModel = ""
     @AppStorage("aiModel.claudeCode") private var claudeCodeModel = ""
     @AppStorage("aiModel.codex") private var codexModel = ""
@@ -550,6 +550,11 @@ struct AISettings: View {
     @AppStorage("summaryPrompt") private var prompt = ""
     @State private var ollamaModels: [String] = []
     @State private var cliModels: [SubscriptionCLI.ModelOption] = []
+    @State private var apiKeyDraft = ""
+    @State private var savedAPIKey = ""
+    @State private var credentialError: String?
+    @State private var migrationError: String?
+    private let summarySettings = SummarySettings()
 
     private var selectedProvider: SummaryService.Provider {
         SummaryService.Provider(rawValue: provider) ?? .anthropic
@@ -561,7 +566,9 @@ struct AISettings: View {
         case .claudeCode: return $claudeCodeModel
         case .codex: return $codexModel
         case .cursor: return $cursorModel
-        case .anthropic, .openai, .appleIntelligence: return $model
+        case .anthropic: return $anthropicModel
+        case .openai: return $openaiModel
+        case .appleIntelligence: return .constant("")
         }
     }
 
@@ -576,14 +583,45 @@ struct AISettings: View {
 
     var body: some View {
         Form {
-            Picker("Provider:", selection: $provider) {
+            Picker("Provider:", selection: Binding(get: { provider }, set: { value in
+                // Pin legacy settings to the old selection before switching.
+                summarySettings.captureLegacyProvider()
+                provider = value
+            })) {
                 ForEach(SummaryService.Provider.allCases) { p in
                     Text(p.displayName).tag(p.rawValue)
                 }
             }
 
-            if selectedProvider == .anthropic || selectedProvider == .openai {
-                SecureField("API key:", text: $apiKey)
+            if selectedProvider.usesAPIKey {
+                SecureField("API key:", text: $apiKeyDraft)
+                HStack {
+                    Button(apiKeyDraft.isEmpty ? "Remove Key" : "Save Key") { saveAPIKey() }
+                        .disabled(apiKeyDraft == savedAPIKey)
+                    Text(apiKeyDraft != savedAPIKey ? "Unsaved key"
+                         : savedAPIKey.isEmpty ? "No key saved" : "Stored in Keychain")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            if let migrationError {
+                Text(migrationError).font(.caption).foregroundStyle(.red)
+                if selectedProvider.usesAPIKey, summarySettings.needsLegacyProvider {
+                    Button("Move Older Settings to \(selectedProvider.displayName)") {
+                        do {
+                            try summarySettings.assignLegacySettings(to: selectedProvider)
+                            loadAPIKey()
+                        } catch {
+                            self.migrationError = error.localizedDescription
+                        }
+                    }
+                }
+            }
+            if let credentialError {
+                Text(credentialError).font(.caption).foregroundStyle(.red)
+            }
+            if migrationError != nil || credentialError != nil {
+                Button("Retry Keychain") { loadAPIKey() }
             }
 
             if let cli = selectedProvider.subscriptionCLI {
@@ -649,6 +687,7 @@ struct AISettings: View {
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
+        .onChange(of: provider, initial: true) { _, _ in loadAPIKey() }
         .task(id: provider) {
             ollamaModels = []
             cliModels = []
@@ -657,6 +696,31 @@ struct AISettings: View {
             } else if let cli = selectedProvider.subscriptionCLI {
                 cliModels = await cli.availableModels()
             }
+        }
+    }
+
+    private func loadAPIKey() {
+        apiKeyDraft = ""
+        savedAPIKey = ""
+        credentialError = nil
+        migrationError = nil
+        do { try summarySettings.migrateLegacySettings() }
+        catch { migrationError = error.localizedDescription }
+        guard selectedProvider.usesAPIKey else { return }
+        do {
+            savedAPIKey = try summarySettings.apiKey(for: selectedProvider)
+            apiKeyDraft = savedAPIKey
+        } catch {
+            credentialError = error.localizedDescription
+        }
+    }
+
+    private func saveAPIKey() {
+        do {
+            try summarySettings.saveAPIKey(apiKeyDraft, for: selectedProvider)
+            loadAPIKey()
+        } catch {
+            credentialError = "The API key wasn't saved. \(error.localizedDescription)"
         }
     }
 }

@@ -31,9 +31,9 @@ final class LibraryBackupTests: XCTestCase {
         let domain = "test.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
-        defaults.setPersistentDomain(["language": "fr", "aiAPIKey": "dummy-original-key"], forName: domain)
+        defaults.setPersistentDomain(["language": "fr", "aiProvider": "anthropic", "aiAPIKey": "dummy-original-key"], forName: domain)
         let backup = dir.appendingPathComponent("snapshot.kleiobackup")
-        let manifest = try LibraryBackup.create(support: source, preferences: ["language": "en", "aiAPIKey": "dummy-excluded-key"], at: backup)
+        let manifest = try LibraryBackup.create(support: source, preferences: ["language": "en", "aiProvider": "openai", "aiModel": "restored-model", "aiAPIKey": "dummy-excluded-key", "aiLegacyProvider": "openai"], at: backup)
         XCTAssertEqual(manifest.recordingCount, 1)
         XCTAssertEqual(try LibraryBackup.inspect(backup).entries, manifest.entries)
         let previous = try LibraryBackup.restore(backup, support: target, defaults: defaults, domain: domain)
@@ -46,8 +46,12 @@ final class LibraryBackupTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: model, encoding: .utf8), "model stays put")
         XCTAssertEqual(defaults.string(forKey: "language"), "en")
         XCTAssertEqual(defaults.string(forKey: "aiAPIKey"), "dummy-original-key")
+        XCTAssertEqual(defaults.string(forKey: "aiLegacyProvider"), "anthropic")
+        XCTAssertEqual(defaults.string(forKey: "aiModel.openai"), "restored-model")
+        XCTAssertNil(defaults.object(forKey: "aiModel"))
         let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: backup.appendingPathComponent("preferences.plist")), format: nil) as? [String: Any])
         XCTAssertNil(plist["aiAPIKey"])
+        XCTAssertNil(plist["aiLegacyProvider"])
     }
 
     func testChangedMediaFailsValidationBeforeReplacingAnything() throws {
@@ -210,7 +214,7 @@ extension LibraryBackupTests {
 
     func testEveryPreferenceKeyIsBackedUpOrDeliberatelyExcluded() throws {
         // Credentials and diagnostics stay out of backups on purpose.
-        let excluded: Set<String> = ["aiAPIKey", "callDetectionDebug"]
+        let excluded: Set<String> = ["aiAPIKey", "aiLegacyProvider", "callDetectionDebug"]
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/Scribe")

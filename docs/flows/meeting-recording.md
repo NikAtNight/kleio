@@ -294,3 +294,15 @@ Owner: the recording lifecycle agent. Requirement: calendar starts must use save
 - `RecordingSession.activeRecording` exposes the mode, origin (manual or auto-record), and target app while recording. The arbiter's calendar rules apply only to recordings it auto-started. Manual auto-stop (`manualAutoStopEnabled`) covers every other meeting-mode recording, including Join & Record. It stops when the recorded app quits if that app is a native conferencing app (Zoom, Teams, FaceTime, Webex, Slack). Browser targets and all-Mac-audio recordings use only the silence rule. Other running conferencing apps are ignored.
 - ScribeApp passes `startBlocked` to the arbiter. While dictation is active or a backup is running, an elapsed countdown waits and logs once to DiagLog. It starts on the first unblocked tick. It gives up if the meeting's scheduled end passes first. Quit now counts active dictation as unfinished work, so it shows the existing "still has work to save" alert instead of quitting mid-dictation.
 - Tests: `RecordingSessionLifecycleTests` runs one case per start origin against an isolated `UserDefaults` suite and shows Join & Record gets manual auto-stop. `ManualAutoStopTests` covers the recorded app quitting, an unrelated app quitting, and browser or untargeted silence-only stops. `AutoRecordArbiterTests` covers the blocked countdown waiting, then starting, and giving up after the meeting ends.
+
+## Workflow fixes, September 30
+
+Owner: main implementation agent. The user authorized the prioritized review fixes and import improvements, and excluded live answer suggestions.
+
+Every recording origin now checks the same availability rule inside `RecordingSession.start`, before requesting permissions or creating media. Active dictation and backup/restore work block toolbar, Home, menu bar, URL, Join & Record, call prompt, and automatic starts. Dictation also refuses backup-time starts. Cancelling or disabling a pending dictation start invalidates its permission request, so a stale response cannot start capture or change a newer session.
+
+Paused calendar auto-recordings suspend process-quit, scheduled-end, overlap, and silence stop checks. On resume, the silence timer excludes paused time. The calendar's scheduled end remains wall-clock time and can stop the recording on the first resumed tick. Explicit cancel and disabling auto-record still stop paused recordings.
+
+`RecordingSessionLifecycleTests.testEveryRecordingOriginRefusesConflictingWorkBeforeCapture` checks the common guard for manual, app, Join & Record, and automatic origins with temporary manifests and a fake capture driver. `DictationLifecycleTests` checks rejected starts and stale permission continuations without requesting real microphone access. `AutoRecordArbiterTests` covers long and repeated pauses, silence resuming, scheduled end, process quit, and explicit stopping.
+
+Integration tests, build evidence, and remaining native gaps are recorded in [imports, exports, and cloud settings](import-and-export.md). Existing live-call, permission, and mute-sync acceptance remains unverified for this patch. The installed app was not replaced.

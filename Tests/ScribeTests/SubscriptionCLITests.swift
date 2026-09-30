@@ -222,7 +222,7 @@ final class SubscriptionCLITests: XCTestCase {
         XCTAssertEqual(Set(keys).count, 3)
         XCTAssertFalse(keys.contains(SummaryService.Provider.anthropic.modelDefaultsKey))
         XCTAssertEqual(SummaryService.Provider.ollama.modelDefaultsKey, "aiOllamaModel")
-        XCTAssertEqual(SummaryService.Provider.anthropic.modelDefaultsKey, "aiModel")
+        XCTAssertEqual(SummaryService.Provider.anthropic.modelDefaultsKey, "aiModel.anthropic")
         for key in keys { XCTAssertTrue(LibraryBackup.preferenceKeys.contains(key), key) }
     }
 }

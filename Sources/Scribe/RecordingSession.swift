@@ -146,10 +146,15 @@ final class RecordingSession: ObservableObject {
     private var sampleCount = 0
     private var micLevelHistory = LevelHistory(minimumInterval: 0)
     private var systemLevelHistory = LevelHistory(minimumInterval: 0)
+    private var startBlockReason: () -> String? = { nil }
 
     init(dependencies: RecordingSessionDependencies = .live, defaults: UserDefaults = .standard) {
         self.dependencies = dependencies
         self.defaults = defaults
+    }
+
+    func configureStartAvailability(_ reason: @escaping () -> String?) {
+        startBlockReason = reason
     }
 
     /// Every UI and calendar start resolves saved preferences here, so no start path skips them.
@@ -197,6 +202,7 @@ final class RecordingSession: ObservableObject {
         origin: RecordingOrigin = .manual
     ) async {
         guard !isBusy, !library.hasPendingRecordingSaves, useLibrary(library) else { return }
+        if let reason = startBlockReason() { lastError = reason; return }
         isStarting = true
         cancelStart = false
         lastError = nil

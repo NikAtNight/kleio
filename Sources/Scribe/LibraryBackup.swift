@@ -10,7 +10,7 @@ enum LibraryBackup {
         "manualAutoStopEnabled", "meetingMuteSyncEnabled", "callDetectionEnabled", "recordingAppShortcuts", "recordingVideoEnabled", "recordingVideoMode",
         "textReplacementRules", "replacementCaseSensitive", "replacementWholeWords", "removeFillerWords",
         "dictationEnabled", "dictationCleanupEnabled", "dictationCleanupBackend", "dictationCleanupOllamaModel",
-        "aiProvider", "aiModel", "aiOllamaModel", "aiModel.claudeCode", "aiModel.codex", "aiModel.cursor", "summaryPrompt", "watchAutoTranscribe", "watchAutoExport",
+        "aiProvider", "aiModel", "aiModel.anthropic", "aiModel.openai", "aiOllamaModel", "aiModel.claudeCode", "aiModel.codex", "aiModel.cursor", "summaryPrompt", "watchAutoTranscribe", "watchAutoExport",
         "watchExportFormats", "watchedFolders", "watchSeenSignatures", "calendarSyncEnabled", "calendarLeadMinutes",
         "calendarSelectedIDs", "calendarOnlyWithLinks", "autoRecordEnabled", "autoRecordCalendarIDs",
         "autoRecordLateJoinMinutes", "autoRecordGraceMinutes", "autoRecordSilenceMinutes", "autoRecordEventOverrides",
@@ -265,9 +265,19 @@ enum LibraryBackup {
         return values
     }
     private static func applyPreferences(_ values: [String: Any], defaults: UserDefaults, domain: String) {
+        SummarySettings(defaults: defaults).captureLegacyProvider()
+        var restoredValues = values
+        // Older backups shared a cloud model preference. Attribute it to the
+        // backup's provider, independently of any key retained on this Mac.
+        if let model = restoredValues.removeValue(forKey: "aiModel") {
+            let provider = SummaryService.Provider(rawValue: values["aiProvider"] as? String ?? "anthropic")
+            if let provider, provider.usesAPIKey, restoredValues[provider.modelDefaultsKey] == nil {
+                restoredValues[provider.modelDefaultsKey] = model
+            }
+        }
         var merged = defaults.persistentDomain(forName: domain) ?? [:]
         for key in preferenceKeys { merged.removeValue(forKey: key) }
-        merged.merge(values) { _, restored in restored }
+        merged.merge(restoredValues) { _, restored in restored }
         defaults.setPersistentDomain(merged, forName: domain)
         defaults.synchronize()
     }

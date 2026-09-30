@@ -259,6 +259,94 @@ final class AutoRecordArbiterTests: XCTestCase {
         XCTAssertEqual(core.lastStopReason, .processQuit)
     }
 
+    func testPauseSuspendsSilenceAcrossRepeatedPauses() {
+        let meeting = event()
+        var config = configuration
+        config.silenceMinutes = 1
+        var core = AutoRecordArbiterCore()
+        let start = advanceToRecording(&core, event: meeting, configuration: config)
+        _ = update(&core, at: start, meetings: [meeting], configuration: config, process: true, recording: true)
+
+        for offset in [20.0, 200] {
+            XCTAssertEqual(update(&core, at: start.addingTimeInterval(offset), meetings: [meeting],
+                                  configuration: config, process: true, recording: true, paused: true), [])
+            XCTAssertEqual(core.phase, .recording(meeting))
+        }
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(200), meetings: [meeting],
+                              configuration: config, process: true, recording: true), [])
+        _ = update(&core, at: start.addingTimeInterval(210), meetings: [meeting],
+                   configuration: config, process: true, recording: true, paused: true)
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(400), meetings: [meeting],
+                              configuration: config, process: true, recording: true), [])
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(429), meetings: [meeting],
+                              configuration: config, process: true, recording: true), [])
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(430), meetings: [meeting],
+                              configuration: config, process: true, recording: true), [.stopRecording(.silence)])
+    }
+
+    func testPauseBeforeSilenceStartsDoesNotAccumulatePausedTime() {
+        let meeting = event()
+        var config = configuration
+        config.silenceMinutes = 1
+        var core = AutoRecordArbiterCore()
+        let start = advanceToRecording(&core, event: meeting, configuration: config)
+
+        _ = update(&core, at: start, meetings: [meeting], configuration: config,
+                   process: true, recording: true, paused: true)
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(200), meetings: [meeting],
+                              configuration: config, process: true, recording: true), [])
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(259), meetings: [meeting],
+                              configuration: config, process: true, recording: true), [])
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(260), meetings: [meeting],
+                              configuration: config, process: true, recording: true), [.stopRecording(.silence)])
+    }
+
+    func testPausedRecordingWaitsToEvaluateScheduledEndUntilResume() {
+        let meeting = event(duration: 600)
+        var core = AutoRecordArbiterCore()
+        let start = advanceToRecording(&core, event: meeting)
+        let afterEnd = meeting.end.addingTimeInterval(5 * 60)
+
+        _ = update(&core, at: start, meetings: [meeting], process: true, recording: true, paused: true)
+        XCTAssertEqual(update(&core, at: afterEnd, meetings: [meeting], process: true,
+                              recording: true, paused: true), [])
+        XCTAssertEqual(core.phase, .recording(meeting))
+        // Audio after resume still keeps a meeting running past its scheduled end.
+        XCTAssertEqual(update(&core, at: afterEnd.addingTimeInterval(1), meetings: [meeting],
+                              process: true, system: true, recording: true), [])
+        XCTAssertEqual(update(&core, at: afterEnd.addingTimeInterval(2), meetings: [meeting],
+                              process: true, recording: true), [.stopRecording(.scheduledEnd)])
+    }
+
+    func testProcessQuitWhilePausedWaitsUntilResume() {
+        let meeting = event()
+        var core = AutoRecordArbiterCore()
+        let start = advanceToRecording(&core, event: meeting)
+
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(1), meetings: [meeting],
+                              recording: true, paused: true), [])
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(300), meetings: [meeting],
+                              recording: true, paused: true), [])
+        XCTAssertEqual(update(&core, at: start.addingTimeInterval(301), meetings: [meeting],
+                              recording: true), [.stopRecording(.processQuit)])
+    }
+
+    func testExplicitStopsStillWorkWhilePaused() {
+        let meeting = event()
+        var core = AutoRecordArbiterCore()
+        let start = advanceToRecording(&core, event: meeting)
+        _ = update(&core, at: start, meetings: [meeting], process: true, recording: true, paused: true)
+
+        XCTAssertEqual(core.cancel(), [.stopRecording(.cancelled)])
+
+        var disabledCore = AutoRecordArbiterCore()
+        advanceToRecording(&disabledCore, event: meeting)
+        var disabled = configuration
+        disabled.enabled = false
+        XCTAssertEqual(update(&disabledCore, at: start, meetings: [meeting], configuration: disabled,
+                              process: true, recording: true, paused: true), [.stopRecording(.disabled)])
+    }
+
     func testDisabledMasterToggleShortCircuitsAndStopsActiveAutoRecording() {
         let meeting = event()
         var disabled = configuration
@@ -329,6 +417,7 @@ final class AutoRecordArbiterTests: XCTestCase {
         system: Bool = false,
         mic: Bool = false,
         recording: Bool = false,
+        paused: Bool = false,
         blocked: Bool = false
     ) -> [AutoRecordCommand] {
         core.update(
@@ -339,6 +428,7 @@ final class AutoRecordArbiterTests: XCTestCase {
             systemAudioActive: system,
             micAudioActive: mic,
             recordingActive: recording,
+            isPaused: paused,
             startBlocked: blocked
         )
     }

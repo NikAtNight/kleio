@@ -61,21 +61,35 @@ enum Exporter {
 
     /// Watch-folder imports remember their source directory and requested
     /// formats. Exporting here keeps automation independent of the UI.
-    static func exportAutomaticallyIfNeeded(_ doc: ScribeDocument) {
+    static func exportAutomaticallyIfNeeded(_ doc: ScribeDocument) throws {
         guard let path = doc.automaticExportDirectory,
               let rawFormats = doc.automaticExportFormats,
               !rawFormats.isEmpty else { return }
         let directory = URL(fileURLWithPath: path, isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let title = sanitizedFileName(doc.title)
+        let baseName = title.isEmpty || title == "." || title == ".." ? "Transcript" : title
+        var exportedFormats: Set<ExportFormat> = []
         for raw in rawFormats {
-            guard let format = ExportFormat(rawValue: raw) else { continue }
-            let url = directory
-                .appendingPathComponent(sanitizedFileName(doc.title))
-                .appendingPathExtension(format.rawValue)
-            do {
-                try render(doc, as: format).write(to: url, atomically: true, encoding: .utf8)
-            } catch {
-                NSLog("Scribe: automatic export failed for %@: %@", doc.title, error.localizedDescription)
+            guard let format = ExportFormat(rawValue: raw), exportedFormats.insert(format).inserted else { continue }
+            let data = Data(render(doc, as: format).utf8)
+            var version = 0
+            while true {
+                let suffix: String
+                switch version {
+                case 0: suffix = ""
+                case 1: suffix = "-\(doc.id.uuidString)"
+                default: suffix = "-\(doc.id.uuidString)-\(version)"
+                }
+                let url = directory.appendingPathComponent(baseName + suffix).appendingPathExtension(format.rawValue)
+                do {
+                    // Exclusive creation protects existing files even if another writer
+                    // claims this name during export. Repeated exports keep earlier versions.
+                    try data.write(to: url, options: .withoutOverwriting)
+                    break
+                } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError {
+                    version += 1
+                }
             }
         }
     }

@@ -22,6 +22,7 @@ final class TranscriptionQueue: ObservableObject {
 
     @Published private(set) var pendingSaveIDs: Set<UUID> = []
     @Published private(set) var errors: [UUID: String] = [:]
+    @Published private(set) var automaticExportErrors: [UUID: String] = [:]
     @Published private(set) var currentDocumentID: UUID?
     var isBusy: Bool { currentDocumentID != nil || !pending.isEmpty || !pendingSaves.isEmpty }
 
@@ -53,7 +54,7 @@ final class TranscriptionQueue: ObservableObject {
 
     private let transcriber: any TranscriptionEngine
     private let inferSpeakers: SpeakerAnalysis.Inference
-    private let exportAutomatically: (ScribeDocument) -> Void
+    private let exportAutomatically: (ScribeDocument) throws -> Void
     private var pending: [Job] = []
     private var pendingSaves: [UUID: PendingSave] = [:]
     private var currentJobID: UUID?
@@ -67,7 +68,7 @@ final class TranscriptionQueue: ObservableObject {
 
     init(transcriber: any TranscriptionEngine = Transcriber(),
          inferSpeakers: SpeakerAnalysis.Inference? = nil,
-         exportAutomatically: @escaping (ScribeDocument) -> Void = Exporter.exportAutomaticallyIfNeeded) {
+         exportAutomatically: @escaping (ScribeDocument) throws -> Void = Exporter.exportAutomaticallyIfNeeded) {
         self.transcriber = transcriber
         if let inferSpeakers {
             self.inferSpeakers = inferSpeakers
@@ -209,6 +210,18 @@ final class TranscriptionQueue: ObservableObject {
               library?.document(id: docID) != nil else { return }
         append(docID, work: .save)
     }
+
+    func retryAutomaticExport(_ docID: UUID) {
+        guard let document = library?.document(id: docID), document.status == .ready else { return }
+        do {
+            try exportAutomatically(document)
+            automaticExportErrors[docID] = nil
+        } catch {
+            automaticExportErrors[docID] = "The transcript was saved, but automatic export failed. \(error.localizedDescription)"
+        }
+    }
+
+    func dismissAutomaticExportError(_ docID: UUID) { automaticExportErrors[docID] = nil }
 
     func cancelCurrent() {
         guard let currentDocumentID else { return }
@@ -439,7 +452,13 @@ final class TranscriptionQueue: ObservableObject {
             return
         }
         clearPendingSave(docID)
-        if fresh.status == .ready { exportAutomatically(fresh) }
+        if fresh.status == .ready {
+            do {
+                try exportAutomatically(fresh)
+                automaticExportErrors[docID] = nil
+            }
+            catch { automaticExportErrors[docID] = "The transcript was saved, but automatic export failed. \(error.localizedDescription)" }
+        }
     }
 
     private func saveFailure(_ message: String, for docID: UUID, speakersOnly: Bool) {
@@ -489,6 +508,7 @@ final class TranscriptionQueue: ObservableObject {
     }
 
     private func removeDeletedDocuments(keeping ids: Set<UUID>) {
+        automaticExportErrors = automaticExportErrors.filter { ids.contains($0.key) }
         pending.removeAll { !ids.contains($0.documentID) }
         pendingCount = pending.count
         for id in pendingSaveIDs.subtracting(ids) { clearPendingSave(id) }

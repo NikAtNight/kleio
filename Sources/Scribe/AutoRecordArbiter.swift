@@ -160,6 +160,7 @@ struct AutoRecordArbiterCore {
     private(set) var lastStopReason: AutoRecordStopReason?
     private var audioEvidenceSince: Date?
     private var silenceSince: Date?
+    private var pausedAt: Date?
     private var cancelledEventIDs: Set<String> = []
     private var overlapNotificationIDs: Set<String> = []
     private var pendingSwitch: AutoRecordEvent?
@@ -172,6 +173,7 @@ struct AutoRecordArbiterCore {
         systemAudioActive: Bool,
         micAudioActive: Bool,
         recordingActive: Bool,
+        isPaused: Bool,
         startBlocked: Bool
     ) -> [AutoRecordCommand] {
         guard configuration.enabled else {
@@ -231,6 +233,7 @@ struct AutoRecordArbiterCore {
             }
             phase = .recording(event)
             silenceSince = nil
+            pausedAt = nil
             return [.startRecording(event)]
 
         case .recording(let event):
@@ -238,7 +241,19 @@ struct AutoRecordArbiterCore {
                 lastStopReason = .manual
                 phase = .stopping(event)
                 silenceSince = nil
+                pausedAt = nil
                 return []
+            }
+            // Match manual auto-stop: pausing suspends all automatic stop checks.
+            if isPaused {
+                if pausedAt == nil { pausedAt = now }
+                return []
+            }
+            if let pausedAt {
+                if let silenceSince {
+                    self.silenceSince = silenceSince.addingTimeInterval(now.timeIntervalSince(pausedAt))
+                }
+                self.pausedAt = nil
             }
             if !processRunning {
                 return stop(event, reason: .processQuit)
@@ -283,6 +298,7 @@ struct AutoRecordArbiterCore {
         cancelledEventIDs.insert(event.eventID)
         audioEvidenceSince = nil
         silenceSince = nil
+        pausedAt = nil
         pendingSwitch = nil
         switch phase {
         case .recording, .stopping:
@@ -300,6 +316,7 @@ struct AutoRecordArbiterCore {
         guard case .countdown(let event, _) = phase else { return [] }
         phase = .recording(event)
         silenceSince = nil
+        pausedAt = nil
         return [.startRecording(event)]
     }
 
@@ -308,6 +325,7 @@ struct AutoRecordArbiterCore {
         cancelledEventIDs.insert(event.eventID)
         phase = .idle
         silenceSince = nil
+        pausedAt = nil
     }
 
     mutating func stopAndSwitch(to event: AutoRecordEvent) -> [AutoRecordCommand] {
@@ -329,6 +347,7 @@ struct AutoRecordArbiterCore {
         lastStopReason = reason
         phase = .stopping(event)
         silenceSince = nil
+        pausedAt = nil
         return [.stopRecording(reason)]
     }
 
@@ -336,6 +355,7 @@ struct AutoRecordArbiterCore {
         guard let event = phase.event else { return [] }
         audioEvidenceSince = nil
         silenceSince = nil
+        pausedAt = nil
         pendingSwitch = nil
         switch phase {
         case .recording:
@@ -481,6 +501,7 @@ final class AutoRecordArbiter: ObservableObject {
             systemAudioActive: systemAudioActive || recordingSystemActive,
             micAudioActive: recordingMicActive,
             recordingActive: activeRecording?.origin == .autoRecord,
+            isPaused: recording.isPaused,
             startBlocked: startBlocked
         )
         let manualCommands = manualAutoStopCore.update(

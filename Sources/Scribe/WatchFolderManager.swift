@@ -15,29 +15,32 @@ struct WatchedFolder: Codable, Identifiable, Hashable {
 final class WatchFolderManager: ObservableObject {
     @Published private(set) var folders: [WatchedFolder] = []
     @Published var autoTranscribe: Bool {
-        didSet { UserDefaults.standard.set(autoTranscribe, forKey: "watchAutoTranscribe") }
+        didSet { defaults.set(autoTranscribe, forKey: "watchAutoTranscribe") }
     }
     @Published var autoExport: Bool {
-        didSet { UserDefaults.standard.set(autoExport, forKey: "watchAutoExport") }
+        didSet { defaults.set(autoExport, forKey: "watchAutoExport") }
     }
     @Published var exportFormats: Set<ExportFormat> {
         didSet {
-            UserDefaults.standard.set(exportFormats.map(\.rawValue).sorted(), forKey: "watchExportFormats")
+            defaults.set(exportFormats.map(\.rawValue).sorted(), forKey: "watchExportFormats")
         }
     }
     @Published private(set) var lastImportedFile: String?
 
     private weak var library: LibraryStore?
     private weak var queue: TranscriptionQueue?
+    private var importer: Importer?
+    private var scanning = false
     private var timer: Timer?
     private var seenSignatures: Set<String> = []
     private var candidates: [String: String] = [:]
+    private let defaults: UserDefaults
 
     private static let foldersKey = "watchedFolders"
     private static let seenKey = "watchSeenSignatures"
 
-    init() {
-        let defaults = UserDefaults.standard
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         autoTranscribe = defaults.object(forKey: "watchAutoTranscribe") == nil
             ? true : defaults.bool(forKey: "watchAutoTranscribe")
         autoExport = defaults.object(forKey: "watchAutoExport") == nil
@@ -46,18 +49,18 @@ final class WatchFolderManager: ObservableObject {
         exportFormats = Set(rawFormats.compactMap(ExportFormat.init(rawValue:)))
         if let data = defaults.data(forKey: Self.foldersKey),
            let decoded = try? JSONDecoder().decode([WatchedFolder].self, from: data) {
-            folders = decoded.filter { FileManager.default.fileExists(atPath: $0.path) }
+            folders = decoded
         }
         seenSignatures = Set(defaults.stringArray(forKey: Self.seenKey) ?? [])
     }
 
-    func configure(library: LibraryStore, queue: TranscriptionQueue) {
+    func configure(library: LibraryStore, queue: TranscriptionQueue, importer: Importer) {
         self.library = library
         self.queue = queue
+        self.importer = importer
         guard timer == nil else { return }
-        scan()
         let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.scan() }
+            Task { @MainActor in await self?.scan() }
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
@@ -71,7 +74,7 @@ final class WatchFolderManager: ObservableObject {
         // Adding a folder establishes a baseline; only later additions are
         // imported. On future launches the signatures let us notice files
         // that arrived while Scribe was closed.
-        for item in mediaItems(in: folder) {
+        for item in mediaItems(in: folder) ?? [] {
             seenSignatures.insert(item.signature)
         }
         persistFolders()
@@ -80,19 +83,27 @@ final class WatchFolderManager: ObservableObject {
 
     func removeFolder(_ folder: WatchedFolder) {
         folders.removeAll { $0.id == folder.id }
-        candidates = candidates.filter { !$0.key.hasPrefix(folder.path + "/") }
+        candidates = candidates.filter { !isDirectChild($0.key, of: folder) }
+        seenSignatures = seenSignatures.filter { !isDirectChild($0, of: folder) }
         persistFolders()
+        persistSeen()
     }
 
-    func scanNow() {
-        scan()
+    func scanNow() async {
+        await scan()
     }
 
-    private func scan() {
-        guard autoTranscribe, let library, let queue else { return }
+    private func scan() async {
+        guard !scanning, autoTranscribe, let library, let queue, let importer, importer.canImport else { return }
+        scanning = true
+        defer { scanning = false }
         var activePaths = Set<String>()
         for folder in folders {
-            for item in mediaItems(in: folder) {
+            // An unavailable folder keeps its history until it can be read again.
+            guard let items = mediaItems(in: folder) else { continue }
+            let signatures = Set(items.map(\.signature))
+            seenSignatures = seenSignatures.filter { !isDirectChild($0, of: folder) || signatures.contains($0) }
+            for item in items {
                 activePaths.insert(item.url.path)
                 if seenSignatures.contains(item.signature) {
                     candidates[item.url.path] = nil
@@ -106,14 +117,15 @@ final class WatchFolderManager: ObservableObject {
                 }
 
                 let formats = autoExport ? Array(exportFormats) : []
-                let ids = Importer.importFiles(
+                guard folders.contains(folder), autoTranscribe, importer.canImport else { break }
+                let ids = await importer.importFiles(
                     [item.url],
                     library: library,
                     queue: queue,
                     automaticExportDirectory: autoExport ? folder.url : nil,
                     automaticExportFormats: formats
                 )
-                if !ids.isEmpty {
+                if !ids.isEmpty, folders.contains(folder) {
                     seenSignatures.insert(item.signature)
                     candidates[item.url.path] = nil
                     lastImportedFile = item.url.lastPathComponent
@@ -124,13 +136,13 @@ final class WatchFolderManager: ObservableObject {
         persistSeen()
     }
 
-    private func mediaItems(in folder: WatchedFolder) -> [(url: URL, signature: String)] {
+    private func mediaItems(in folder: WatchedFolder) -> [(url: URL, signature: String)]? {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
-        let urls = (try? FileManager.default.contentsOfDirectory(
+        guard let urls = try? FileManager.default.contentsOfDirectory(
             at: folder.url,
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles]
-        )) ?? []
+        ) else { return nil }
         return urls.compactMap { url in
             guard Importer.isSupported(url),
                   let values = try? url.resourceValues(forKeys: keys),
@@ -143,14 +155,19 @@ final class WatchFolderManager: ObservableObject {
 
     private func persistFolders() {
         if let data = try? JSONEncoder().encode(folders) {
-            UserDefaults.standard.set(data, forKey: Self.foldersKey)
+            defaults.set(data, forKey: Self.foldersKey)
         }
     }
 
+    private func isDirectChild(_ pathOrSignature: String, of folder: WatchedFolder) -> Bool {
+        let prefix = folder.path == "/" ? "/" : folder.path + "/"
+        guard pathOrSignature.hasPrefix(prefix) else { return false }
+        return !pathOrSignature.dropFirst(prefix.count).contains("/")
+    }
+
     private func persistSeen() {
-        // Keep preferences bounded even for long-running newsroom workflows.
-        let values = Array(seenSignatures.suffix(5_000))
-        seenSignatures = Set(values)
-        UserDefaults.standard.set(values, forKey: Self.seenKey)
+        // Scans prune obsolete signatures, never files still in a watched folder.
+        let values = seenSignatures.sorted()
+        defaults.set(values, forKey: Self.seenKey)
     }
 }

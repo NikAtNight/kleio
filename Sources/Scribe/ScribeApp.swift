@@ -166,6 +166,7 @@ struct ScribeApp: App {
     @StateObject private var appState = AppState()
     @StateObject private var replacementStore = ReplacementStore()
     @StateObject private var watchFolders = WatchFolderManager()
+    @StateObject private var importer = Importer()
     @StateObject private var dictation = DictationController()
     @StateObject private var calendarSync = CalendarSync()
     @StateObject private var autoRecordArbiter = AutoRecordArbiter()
@@ -182,6 +183,7 @@ struct ScribeApp: App {
                 .environmentObject(appState)
                 .environmentObject(replacementStore)
                 .environmentObject(watchFolders)
+                .environmentObject(importer)
                 .environmentObject(dictation)
                 .environmentObject(calendarSync)
                 .onAppear {
@@ -192,32 +194,46 @@ struct ScribeApp: App {
                         attendeeNamesProvider: calendarSync.attendeeNames(forEventID:)
                     )
                     summaries.configure(library: library)
-                    watchFolders.configure(library: library, queue: queue)
+                    importer.startBlocked = { [weak backups = backups] in backups?.isWorking == true }
+                    watchFolders.configure(library: library, queue: queue, importer: importer)
+                    recording.configureStartAvailability { [weak dictation = dictation, weak backups = backups] in
+                        if let dictation, dictation.phase != .idle { return "Finish dictation before starting a recording." }
+                        if backups?.isWorking == true { return "Finish the backup or restore before starting a recording." }
+                        return nil
+                    }
+                    dictation.startBlockReason = { [weak backups = backups] in
+                        backups?.isWorking == true ? "Finish the backup or restore before starting dictation." : nil
+                    }
                     dictation.configure(
                         modelManager: modelManager,
                         replacements: replacementStore,
                         recordingSession: recording
                     )
                     appDelegate.onOpenFiles = { urls in
-                        let ids = Importer.importFiles(urls, library: library, queue: queue)
-                        if let first = ids.first { appState.select(document: first) }
+                        Task {
+                            let ids = await importer.importFiles(urls, library: library, queue: queue)
+                            if let first = ids.first { appState.select(document: first) }
+                        }
                     }
                     appDelegate.onCommandURL = { command in
                         KleioURLCommandHandler(recording: recording, library: library, queue: queue,
                                                dictation: dictation, appState: appState).handle(command)
                     }
                     appDelegate.hasBackgroundWork = {
-                        queue.isBusy || summaries.isBusy || backups.isWorking || dictation.phase != .idle
+                        importer.isBusy || queue.isBusy || summaries.isBusy || backups.isWorking || dictation.phase != .idle
                     }
                     appDelegate.recording = recording
                     appDelegate.finishRecording = {
                         await recording.prepareToQuit(library: library, queue: queue)
+                        await importer.prepareToQuit()
                         let transcriptSaved = await queue.prepareToQuit()
                         let summariesSaved = await summaries.prepareToQuit()
                         let backupFinished = await backups.prepareToQuit()
                         await dictation.prepareToQuit()
-                        return !recording.isBusy && !queue.isBusy && !summaries.isBusy && !backups.isWorking
+                        let saved = !recording.isBusy && !importer.isBusy && !queue.isBusy && !summaries.isBusy && !backups.isWorking
                             && transcriptSaved && summariesSaved && backupFinished
+                        if !saved { importer.resumeAfterCancelledQuit() }
+                        return saved
                     }
                     appDelegate.willTerminate = { callDetection.releaseBeforeQuit() }
                     appDelegate.calendarSync = calendarSync
@@ -281,6 +297,7 @@ struct ScribeApp: App {
                 .environmentObject(modelManager)
                 .environmentObject(replacementStore)
                 .environmentObject(watchFolders)
+                .environmentObject(importer)
                 .environmentObject(dictation)
                 .environmentObject(calendarSync)
         }

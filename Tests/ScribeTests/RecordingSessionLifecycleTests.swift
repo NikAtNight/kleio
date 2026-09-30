@@ -4,6 +4,39 @@ import XCTest
 
 @MainActor
 final class RecordingSessionLifecycleTests: XCTestCase {
+    func testEveryRecordingOriginRefusesConflictingWorkBeforeCapture() async throws {
+        let event = AutoRecordEvent(eventID: "blocked-event", title: "Meeting", start: Date(),
+                                    end: Date().addingTimeInterval(3_600), joinURL: nil)
+        let starts: [@MainActor (RecordingSession, LibraryStore) async -> Void] = [
+            { await $0.startUsingPreferences(mode: .meeting, library: $1) },
+            { await $0.startUsingPreferences(mode: .meeting, library: $1,
+                                             shortcut: RecordingApplication(bundleID: "us.zoom.xos", name: "Zoom"), videoMode: nil) },
+            { await $0.startUsingPreferences(mode: .meeting, library: $1, calendarEvent: event) },
+            { await $0.startAutoRecording(for: event, library: $1, storeCalendarDetails: true) },
+        ]
+        for reason in ["Finish dictation first.", "Finish the backup first."] {
+            for start in starts {
+                let fixture = try Fixture()
+                let driver = SyntheticCaptureDriver()
+                let session = fixture.session(driver: driver)
+                var blocked = true
+                session.configureStartAvailability { blocked ? reason : nil }
+                await start(session, fixture.library)
+                XCTAssertFalse(session.isBusy)
+                XCTAssertEqual(session.lastError, reason)
+                XCTAssertEqual(driver.permissionRequests, 0)
+                XCTAssertTrue(driver.events.isEmpty)
+                XCTAssertTrue(fixture.library.documents.isEmpty)
+
+                blocked = false
+                await start(session, fixture.library)
+                XCTAssertTrue(session.isRecording)
+                session.stop(library: fixture.library, queue: fixture.queue)
+                await session.waitForFinalization()
+            }
+        }
+    }
+
     func testEveryStartOriginAppliesSavedRecordingPreferences() async throws {
         let zoom = RecordingApplication(bundleID: "us.zoom.xos", name: "Zoom")
         let event = AutoRecordEvent(eventID: "event-1", title: "Planning call", start: Date(),

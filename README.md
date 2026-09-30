@@ -18,7 +18,7 @@ A native macOS meeting recorder with local transcription and speaker review. Req
 ## Other features
 
 - Microphone-only voice memos and an explicit all-Mac-audio recording mode.
-- Drag and drop, file import, batch transcription, and podcast participant tracks.
+- Drag and drop, file import, batch transcription, and podcast participant tracks. Media copying and inspection run in the background, with progress and file errors shown in the main window.
 - Local Whisper models through WhisperKit, with download, selection, and deletion in Settings.
 - Timestamped transcript editing, search/replace, waveform seeking, playback speed, and meeting notes.
 - Export to TXT, Markdown, HTML, SRT, VTT, CSV, JSON, or the clipboard.
@@ -26,15 +26,17 @@ A native macOS meeting recorder with local transcription and speaker review. Req
 - Call prompts in the bottom-left corner with **Audio** and **Audio + screen** choices. Enable Accessibility access in Settings → General → Recording. Candidate readers cover Slack Huddles, Teams, Google Meet, Zoom, and FaceTime; live app detection remains unverified and hidden browser tabs may be unreadable. See [call detection](docs/flows/call-detection.md).
 - Menu bar app. Kleio only appears in the Dock while a window is open, and keeps recording, transcribing, and watching for calls after the last window closes. Reopen it from the menu bar scroll icon.
 - System-wide dictation with ⌥Space, optional local cleanup, and reusable replacement rules.
-- Watch folders with automatic transcription and export.
+- Watch folders with automatic transcription and export. Automatic exports preserve existing files by choosing another filename. Export failures can be retried without transcribing again.
 - Optional summaries through Apple Intelligence or Ollama locally, or a cloud provider explicitly configured in Settings → AI.
 - Summaries through your Claude, ChatGPT, or Cursor subscription. Kleio runs the official `claude`, `codex`, or Cursor `agent` CLI with tools off, no MCP servers or plugins, no saved session, and an empty temporary folder. It never reads the CLI's credentials. Sign in from Settings → AI, which opens Terminal on the CLI's own login command. Transcription always stays on the Mac.
 
 Summaries require a general-purpose instruction model. The s1-mini model is reserved for dictation cleanup. Long transcripts are processed in bounded parts without discarding the end; repeated, empty, oversized, or incomplete responses are rejected. These checks detect generation failures, not factual accuracy. Review summaries against the transcript before relying on decisions or action items. Generation continues when navigating to another recording. Later transcript, note, or speaker-name changes mark the saved summary out of date. Renaming a recording doesn't.
 
+Anthropic and OpenAI keep separate model settings and API keys. Settings → AI saves keys in the macOS Keychain. Older keys move there only after storage succeeds; if the old provider is unknown, choose it and use **Move Older Settings**. Keys stay out of library backups.
+
 ## Back up and restore
 
-Settings → General includes **Back Up Library** and **Restore Backup**. A `.kleiobackup` folder contains recording media, manifests, transcripts, summaries, notes, saved people, voice profiles, and selected local preferences. Downloaded models and credentials are excluded. Finish active recording, processing, and pending saves before starting a backup.
+Settings → General includes **Back Up Library** and **Restore Backup**. A `.kleiobackup` folder contains recording media, manifests, transcripts, summaries, notes, saved people, voice profiles, and selected local preferences. Downloaded models and credentials are excluded. Finish active recording, imports, processing, and pending saves before starting a backup.
 
 Restore verifies file hashes and recording metadata before changing the library. It runs on the next launch and preserves the previous library in `~/Library/Application Support/Scribe/Backups/`. Keep the selected backup in place until that launch finishes. An interrupted restore is recovered before the app opens its library. Copy the backup to another drive for protection from drive failure.
 

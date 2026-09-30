@@ -27,7 +27,7 @@ final class SummaryJobs: ObservableObject {
     private var pendingResults: [UUID: Result] = [:]
     private var libraryObservation: AnyCancellable?
 
-    init(generate: @escaping (ScribeDocument) async throws -> String = SummaryService.summarize) {
+    init(generate: @escaping (ScribeDocument) async throws -> String = { try await SummaryService.summarize($0) }) {
         self.generate = generate
     }
 
