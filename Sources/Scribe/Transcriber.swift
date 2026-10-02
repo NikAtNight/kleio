@@ -40,7 +40,7 @@ actor Transcriber {
     private var idleToken = 0
     private var activeTranscriptions = 0
 
-    init(idleDelay: @escaping @Sendable () -> TimeInterval? = Transcriber.configuredIdleDelay) {
+    init(idleDelay: @escaping @Sendable () -> TimeInterval? = { Transcriber.configuredIdleDelay() }) {
         self.idleDelay = idleDelay
     }
 
