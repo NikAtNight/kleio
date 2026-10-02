@@ -211,7 +211,7 @@ struct TranscriptView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .help(document.modelUsed.map { variant in
-                    "Transcribed with " + (ModelManager.catalog.first { $0.variant == variant }?.displayName ?? variant)
+                    "Transcribed with " + ModelManager.displayName(for: variant)
                 } ?? "Recording details")
                 Spacer(minLength: 0)
                 Picker("Document section", selection: $selectedTab) {

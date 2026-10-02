@@ -76,6 +76,8 @@ The [pyannote tutorial fixture and RTTM](https://github.com/pyannote/pyannote-au
 
 Analysis timing includes cached-model loading when the actor has not prepared it. The first run followed the download; later runs benefited from system compilation/cache state. The one-person result uses the application's bypass and performs no model inference or speech detection, so it has no accuracy metrics.
 
+On October 2, 2026, after moving FluidAudio from 0.15.5 to 0.17.5 for Parakeet transcription, an automatic Community-1 rerun on the same 30-second sample again produced 2 groups with 0.098 seconds of annotated speech uncovered. Sortformer was not rerun.
+
 Both two-person runs produced the same assignments. Correct counting did not imply perfect attribution. Reference speaker91's exclusive speech overlapped the other speaker's main cluster for 0.869 seconds cumulatively. About 0.731 seconds came from the short reply at 7.55 to 8.35 seconds; the remainder came from other boundary errors. There was also 0.218 seconds of secondary-cluster overlap for reference speaker90, below the report's 0.25-second split/merge pairing threshold. The model left 0.098 seconds of annotated speech uncovered. Automatic analysis of the one-speaker derivative produced no extra group and left 0.028 seconds uncovered. No thresholds or model settings were tuned to this sample.
 
 Scoring definitions:

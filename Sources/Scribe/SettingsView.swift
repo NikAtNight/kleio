@@ -362,10 +362,10 @@ struct GeneralSettings: View {
                     Text(lang.name).tag(lang.code)
                 }
             }
-            .help("Auto-detect works well; setting it explicitly is faster and more accurate. English-only models always use English.")
+            .help("Auto-detect works well; setting it explicitly is faster and more accurate. English-only models always use English. Parakeet models stop with an error if they don't support the chosen language.")
 
             Toggle("Translate to English", isOn: $translate)
-                .help("Transcribe non-English audio directly into English text")
+                .help("Transcribe non-English audio directly into English text. Whisper models only.")
 
             Section("Speakers") {
                 TextField("My microphone name:", text: $microphoneName)
@@ -435,21 +435,45 @@ struct GeneralSettings: View {
 
 struct ModelSettings: View {
     @EnvironmentObject private var modelManager: ModelManager
+    @AppStorage(Transcriber.idleUnloadMinutesKey) private var idleUnloadMinutes = Transcriber.defaultIdleUnloadMinutes
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             List {
-                ForEach(ModelManager.catalog) { model in
-                    ModelRow(model: model)
+                ForEach(TranscriptionModelEngine.allCases, id: \.self) { engine in
+                    Section {
+                        ForEach(ModelManager.catalog.filter { $0.engine == engine }) { model in
+                            ModelRow(model: model)
+                        }
+                    } header: {
+                        Text(engine.title)
+                    } footer: {
+                        Text(engine.summary).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
             .listStyle(.inset)
             .frame(minHeight: 180)
 
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("Unload model when idle", selection: $idleUnloadMinutes) {
+                    Text("Never").tag(0)
+                    Text("After 1 minute").tag(1)
+                    Text("After 5 minutes").tag(5)
+                    Text("After 10 minutes").tag(10)
+                    Text("After 30 minutes").tag(30)
+                    Text("After 1 hour").tag(60)
+                }
+                Text("Frees the model's memory after a stretch with no transcription or dictation. The next job reloads it, which takes a few seconds.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+
             SpeakerModelSettings()
                 .padding(.horizontal, 16)
 
-            Text("Larger models are more accurate but slower. Small (English) is a good default for calls; Large v3 Turbo is the accuracy sweet spot on Apple Silicon.")
+            Text("Parakeet v3 is the fastest choice for most calls. Whisper Large v3 Turbo is the accuracy sweet spot when you need vocabulary hints, translation, or a language Parakeet doesn't cover. Compressed builds trade a little accuracy for a smaller download.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(12)
@@ -508,7 +532,7 @@ struct SpeakerModelSettings: View {
 
 struct ModelRow: View {
     @EnvironmentObject private var modelManager: ModelManager
-    let model: WhisperModelInfo
+    let model: TranscriptionModelInfo
 
     private var isDownloaded: Bool { modelManager.isDownloaded(model.variant) }
     private var isSelected: Bool { modelManager.selectedVariant == model.variant }

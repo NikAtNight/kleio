@@ -1,9 +1,10 @@
 import Foundation
 import WhisperKit
 
-/// Wraps WhisperKit: loads a CoreML Whisper model (downloaded from the
-/// argmaxinc/whisperkit-coreml registry) and transcribes audio files into
-/// timestamped segments. Proven core adapted from LocalFlow.
+/// Loads a local model and transcribes audio files into timestamped
+/// segments. Whisper models run through WhisperKit (argmaxinc/whisperkit-coreml
+/// registry); Parakeet models run through `ParakeetTranscriber`. Proven core
+/// adapted from LocalFlow.
 actor Transcriber {
     enum TranscriberError: Error, LocalizedError {
         case notLoaded
@@ -11,13 +12,14 @@ actor Transcriber {
 
         var errorDescription: String? {
             switch self {
-            case .notLoaded: return "Whisper model is not loaded yet."
+            case .notLoaded: return "The transcription model is not loaded yet."
             case .cancelled: return "Transcription was cancelled."
             }
         }
     }
 
     private var whisperKit: WhisperKit?
+    private var parakeet: ParakeetTranscriber?
     private(set) var loadedModel: String?
     private var loadGeneration = 0
     private var vocabularyTerms: [String]?
@@ -26,7 +28,26 @@ actor Transcriber {
     /// off-actor — hence a lock-guarded flag rather than actor state.
     private let cancelFlag = CancelFlag()
 
-    var isLoaded: Bool { whisperKit != nil }
+    var isLoaded: Bool { whisperKit != nil || parakeet != nil }
+
+    /// Minutes without a load or transcription before the model is released
+    /// to free memory. 0 keeps it loaded. The next `load(model:)` reloads it.
+    static let idleUnloadMinutesKey = "unloadIdleModelMinutes"
+    static let defaultIdleUnloadMinutes = 10
+
+    private let idleDelay: @Sendable () -> TimeInterval?
+    private var idleUnload: Task<Void, Never>?
+    private var idleToken = 0
+    private var activeTranscriptions = 0
+
+    init(idleDelay: @escaping @Sendable () -> TimeInterval? = Transcriber.configuredIdleDelay) {
+        self.idleDelay = idleDelay
+    }
+
+    nonisolated static func configuredIdleDelay() -> TimeInterval? {
+        let minutes = UserDefaults.standard.object(forKey: idleUnloadMinutesKey) as? Int ?? defaultIdleUnloadMinutes
+        return minutes > 0 ? TimeInterval(minutes) * 60 : nil
+    }
 
     /// Names and correction targets that Whisper should treat as prior text.
     /// Passing nil removes the bias.
@@ -39,16 +60,26 @@ actor Transcriber {
     /// with a different model name: the previous pipeline keeps serving until
     /// the replacement is ready, so a failed load never strands the app.
     func load(model: String) async throws {
-        if loadedModel == model, whisperKit != nil { return }
+        cancelIdleUnload()
+        defer { scheduleIdleUnload() }
+        if loadedModel == model, isLoaded { return }
         loadGeneration += 1
         let generation = loadGeneration
 
-        let config = WhisperKitConfig(model: model, downloadBase: ModelManager.downloadBase)
-        let pipe = try await WhisperKit(config)
+        if ParakeetTranscriber.isParakeet(model) {
+            let engine = try await ParakeetTranscriber.load(model: model)
+            guard generation == loadGeneration else { return }
+            parakeet = engine
+            whisperKit = nil
+        } else {
+            let config = WhisperKitConfig(model: model, downloadBase: ModelManager.downloadBase)
+            let pipe = try await WhisperKit(config)
 
-        // The actor is reentrant across that await: last requested load wins.
-        guard generation == loadGeneration else { return }
-        whisperKit = pipe
+            // The actor is reentrant across that await: last requested load wins.
+            guard generation == loadGeneration else { return }
+            whisperKit = pipe
+            parakeet = nil
+        }
         loadedModel = model
         refreshVocabularyTokens()
     }
@@ -67,6 +98,16 @@ actor Transcriber {
         translate: Bool,
         onProgress: (@Sendable (Double, String) -> Void)? = nil
     ) async throws -> [TranscriptSegment] {
+        cancelIdleUnload()
+        activeTranscriptions += 1
+        defer {
+            activeTranscriptions -= 1
+            scheduleIdleUnload()
+        }
+        if let parakeet, let loadedModel {
+            return try await transcribe(file: url, with: parakeet, model: loadedModel, source: source,
+                                        language: language, translate: translate, onProgress: onProgress)
+        }
         guard let whisperKit else { throw TranscriberError.notLoaded }
         cancelFlag.clear()
 
@@ -98,6 +139,73 @@ actor Transcriber {
         if cancelFlag.isSet { throw TranscriberError.cancelled }
 
         return Self.segments(from: results, source: source, duration: duration)
+    }
+
+    private func cancelIdleUnload() {
+        idleUnload?.cancel()
+        idleUnload = nil
+        idleToken += 1
+    }
+
+    /// The token makes a timer that already woke up harmless after any later
+    /// load or transcription.
+    private func scheduleIdleUnload() {
+        cancelIdleUnload()
+        guard isLoaded, let delay = idleDelay() else { return }
+        let token = idleToken
+        idleUnload = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            await self?.unloadIfIdle(token)
+        }
+    }
+
+    private func unloadIfIdle(_ token: Int) {
+        guard token == idleToken, activeTranscriptions == 0, let model = loadedModel else { return }
+        whisperKit = nil
+        parakeet = nil
+        loadedModel = nil
+        vocabularyTokens = nil
+        idleUnload = nil
+        DiagLog.log("unloaded idle transcription model %@", model)
+    }
+
+    /// Parakeet decoding runs in a child task so `cancelCurrent()` and a
+    /// cancelled caller both stop it between chunks. Like the Whisper path,
+    /// it expects one transcription at a time per `Transcriber`: the queue
+    /// is serial and dictation owns its own instance.
+    private func transcribe(
+        file url: URL,
+        with engine: ParakeetTranscriber,
+        model: String,
+        source: AudioSource,
+        language: String?,
+        translate: Bool,
+        onProgress: (@Sendable (Double, String) -> Void)?
+    ) async throws -> [TranscriptSegment] {
+        let selectedLanguage = language?.trimmingCharacters(in: .whitespacesAndNewlines)
+        try ParakeetTranscriber.validate(model: model, language: selectedLanguage, translate: translate)
+        cancelFlag.clear()
+        let duration = audioDuration(of: url)
+        let progress = onProgress.map { report in { @Sendable (fraction: Double) in report(fraction, "") } }
+        let work = Task {
+            try await engine.transcribe(file: url, source: source, language: selectedLanguage,
+                                        duration: duration, onProgress: progress)
+        }
+        cancelFlag.onSet { work.cancel() }
+        defer { cancelFlag.onSet(nil) }
+        do {
+            let segments = try await withTaskCancellationHandler {
+                try await work.value
+            } onCancel: {
+                work.cancel()
+            }
+            // Match the Whisper path: a cancel after the last chunk still wins.
+            if cancelFlag.isSet { throw TranscriberError.cancelled }
+            return segments
+        } catch {
+            if cancelFlag.isSet || error is CancellationError { throw TranscriberError.cancelled }
+            throw error
+        }
     }
 
     nonisolated static func decodingOptions(language: String?, translate: Bool, model: String?) -> DecodingOptions {
@@ -197,9 +305,11 @@ actor Transcriber {
 }
 
 /// Lock-guarded bool readable from WhisperKit's synchronous callback thread.
+/// An optional handler also cancels work that can't poll the flag.
 final class CancelFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
+    private var handler: (@Sendable () -> Void)?
 
     var isSet: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -207,8 +317,20 @@ final class CancelFlag: @unchecked Sendable {
     }
 
     func set() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         value = true
+        let cancel = handler
+        lock.unlock()
+        cancel?()
+    }
+
+    /// Runs `cancel` on the next `set()`, or now if the flag is already set.
+    func onSet(_ cancel: (@Sendable () -> Void)?) {
+        lock.lock()
+        handler = cancel
+        let fire = value
+        lock.unlock()
+        if fire { cancel?() }
     }
 
     func clear() {

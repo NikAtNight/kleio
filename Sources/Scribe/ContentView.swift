@@ -520,19 +520,26 @@ struct HomeView: View {
             }
             Spacer()
             Menu {
-                ForEach(ModelManager.catalog.filter { modelManager.isDownloaded($0.variant) }) { model in
-                    Button {
-                        modelManager.selectedVariant = model.variant
-                    } label: {
-                        if model.variant == modelManager.selectedVariant {
-                            Label(model.displayName, systemImage: "checkmark")
-                        } else { Text(model.displayName) }
+                ForEach(TranscriptionModelEngine.allCases, id: \.self) { engine in
+                    let models = ModelManager.catalog.filter { $0.engine == engine && modelManager.isDownloaded($0.variant) }
+                    if !models.isEmpty {
+                        Section(engine.title) {
+                            ForEach(models) { model in
+                                Button {
+                                    modelManager.selectedVariant = model.variant
+                                } label: {
+                                    if model.variant == modelManager.selectedVariant {
+                                        Label(model.displayName, systemImage: "checkmark")
+                                    } else { Text(model.displayName) }
+                                }
+                            }
+                        }
                     }
                 }
                 Divider()
                 Button("Manage models…") { openSettings() }
             } label: {
-                Label(ModelManager.catalog.first { $0.variant == modelManager.selectedVariant }?.displayName ?? "Choose model",
+                Label(ModelManager.info(for: modelManager.selectedVariant)?.displayName ?? "Choose model",
                       systemImage: "cpu")
             }
             .menuStyle(.borderlessButton)

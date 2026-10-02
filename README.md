@@ -19,7 +19,11 @@ A native macOS meeting recorder with local transcription and speaker review. Req
 
 - Microphone-only voice memos and an explicit all-Mac-audio recording mode.
 - Drag and drop, file import, batch transcription, and podcast participant tracks. Media copying and inspection run in the background, with progress and file errors shown in the main window.
-- Local Whisper models through WhisperKit, with download, selection, and deletion in Settings.
+- Local transcription models with download, selection, and deletion in Settings → Models, grouped by engine:
+  - **Parakeet** (NVIDIA, through FluidAudio): v3 for 25 European languages, v2 and 110M for English, and a Japanese model. An 11-minute recording took about 5 seconds on an M5 Pro, including model load. Parakeet has no vocabulary hints and can't translate; it stops with an error if Translate to English is on or the chosen spoken language isn't supported. Replacement rules still apply.
+  - **Whisper** (OpenAI, through WhisperKit): Tiny through Large v3, Large v3 Turbo, Distil Large v3, and smaller compressed builds of Small, Large v3, Large v3 Turbo, and Distil. Whisper uses vocabulary hints and can translate to English.
+  - Settings → Models → **Unload model when idle** releases the transcription model after 1 to 60 minutes without a transcription or dictation (10 minutes by default, or Never). The next job reloads it in a few seconds. Speaker models are small and stay loaded.
+  - Kleio copies models already downloaded by LocalFlow on launch, so the first Parakeet or Whisper run needs no download. The selected model is used for meetings, imports, watch folders, and dictation.
 - Timestamped transcript editing, search/replace, waveform seeking, playback speed, and meeting notes.
 - Export to TXT, Markdown, HTML, SRT, VTT, CSV, JSON, or the clipboard.
 - Optional Calendar integration and automatic call recording with a visible countdown. See [the auto-record plan](docs/auto-record-plan.md).
@@ -67,7 +71,7 @@ The automated tests cover domain behavior and generated media. Real meeting accu
 
 - SwiftUI and AppKit, built as a Swift Package executable.
 - Core Audio process taps select app/helper processes. ScreenCaptureKit and AVAssetWriter handle optional video. `RecordingClock` and `TimelineAudioWriter` keep both audio sources aligned and preserve interruptions as silence.
-- [WhisperKit](https://github.com/argmaxinc/WhisperKit) handles local transcription; [FluidAudio](https://github.com/FluidInference/FluidAudio) supplies Core ML speaker models. Speaker analysis never downloads models implicitly.
+- [WhisperKit](https://github.com/argmaxinc/WhisperKit) runs Whisper models; [FluidAudio](https://github.com/FluidInference/FluidAudio) runs Parakeet models and supplies Core ML speaker models. FluidAudio is pinned to its 0.17 minor because it ships breaking changes in minor releases. Speaker analysis never downloads models implicitly. Parakeet models live in `~/Library/Application Support/Scribe/models/FluidAudio/`.
 - Each library document lives in `~/Library/Application Support/Scribe/library/<uuid>/`, with `document.json` and its media files. Optional manifest fields preserve compatibility with older documents.
 - The Kleio rename preserves the `app.talix.scribe` bundle identifier, existing preferences, and Scribe storage paths. The Swift module remains `Scribe`; the executable and visible app name are `Kleio`.
 - Saved people are local names, independent of the legacy voice-profile store. Original media and raw transcription remain available through speaker corrections.

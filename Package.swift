@@ -9,7 +9,9 @@ let package = Package(
     products: [.executable(name: "Kleio", targets: ["Scribe"])],
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.4")
+        // Pinned to the minor: FluidAudio is pre-1.0 and ships breaking changes in
+        // minor releases. 0.17 adds Parakeet v2/v3 file transcription.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", .upToNextMinor(from: "0.17.5"))
     ],
     targets: [
         .executableTarget(
