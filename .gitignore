@@ -3,3 +3,4 @@ build/
 Resources/AppIcon.icns
 .DS_Store
 .worktrees/
+.wrangler/
