@@ -1,5 +1,7 @@
 # Kleio
 
+[Website](https://kleio-nan.pages.dev)
+
 A native macOS meeting recorder with local transcription and speaker review. Requires macOS 15 or later. Recording, transcription, and speaker detection run on the Mac; models need a one-time download.
 
 ## Recording and review
