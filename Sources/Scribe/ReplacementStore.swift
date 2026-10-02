@@ -9,7 +9,7 @@ struct TextReplacement: Codable, Identifiable, Hashable {
 
 /// User-defined cleanup rules applied to every newly decoded segment. The
 /// store is intentionally tiny and lives in UserDefaults so it can be used
-/// by dictation, file transcription, and watch-folder jobs alike.
+/// by recording, file transcription, and watch-folder jobs alike.
 @MainActor
 final class ReplacementStore: ObservableObject {
     @Published var rules: [TextReplacement] {
@@ -73,10 +73,6 @@ final class ReplacementStore: ObservableObject {
             guard !term.isEmpty, seen.insert(term.lowercased()).inserted else { return nil }
             return term
         }.prefix(50).map { $0 }
-    }
-
-    func deleteRules(at offsets: IndexSet) {
-        rules.remove(atOffsets: offsets)
     }
 
     func apply(to text: String) -> String {

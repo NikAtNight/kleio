@@ -22,7 +22,7 @@ final class ParakeetTranscriber: Sendable {
                 return "Parakeet models can't translate. Turn off Translate to English or choose a Whisper model."
             case .unsupportedLanguage(let model, let language):
                 let name = Locale.current.localizedString(forLanguageCode: language) ?? language
-                return "\(model) can't transcribe \(name). Choose a Whisper model or change the spoken language in Settings."
+                return "\(model) can't transcribe \(name). Choose a Whisper model or change the spoken language in Settings → Language."
             }
         }
     }
@@ -44,7 +44,7 @@ final class ParakeetTranscriber: Sendable {
         "parakeet-tdt-0.6b-ja": ["ja"],
     ]
 
-    /// Short clips, like a quick dictation, are padded with trailing silence
+    /// Short clips, like a brief voice memo, are padded with trailing silence
     /// to this length. FluidAudio rejects audio under 0.3 s and can return no
     /// tokens for very short speech.
     nonisolated static let minimumSeconds: TimeInterval = 1.5

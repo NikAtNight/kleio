@@ -96,7 +96,7 @@ final class SummaryProviderTests: XCTestCase {
         }
     }
 
-    func testSummaryRejectsDictationModelBeforeSendingARequest() async {
+    func testSummaryRejectsCleanupModelBeforeSendingARequest() async {
         defaults.set("ollama", forKey: providerKey)
         defaults.set("s1-mini:latest", forKey: ollamaModelKey)
         let document = ScribeDocument(title: "Test", kind: .recording, status: .ready)

@@ -7,6 +7,7 @@ enum Theme {
         .system(size: size, weight: .bold)
     }
 
+    static let cardRadius: CGFloat = 14
     static let metaLabel: Font = .system(size: 12, weight: .medium)
     static let metaValue: Font = .system(size: 13).monospacedDigit()
     static let paperBackground = Color(nsColor: NSColor(

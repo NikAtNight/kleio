@@ -6,10 +6,9 @@ struct LibraryBackupSettings: View {
     @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var queue: TranscriptionQueue
     @EnvironmentObject private var summaries: SummaryJobs
-    @EnvironmentObject private var dictation: DictationController
     @EnvironmentObject private var backups: LibraryBackupJobs
     @EnvironmentObject private var importer: Importer
-    private var busy: Bool { importer.isBusy || recording.isBusy || library.hasPendingRecordingSaves || queue.isBusy || summaries.isBusy || dictation.phase != .idle }
+    private var busy: Bool { importer.isBusy || recording.isBusy || library.hasPendingRecordingSaves || queue.isBusy || summaries.isBusy }
 
     var body: some View {
         Section("Backup and restore") {

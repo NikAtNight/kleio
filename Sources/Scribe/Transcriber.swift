@@ -171,8 +171,8 @@ actor Transcriber {
 
     /// Parakeet decoding runs in a child task so `cancelCurrent()` and a
     /// cancelled caller both stop it between chunks. Like the Whisper path,
-    /// it expects one transcription at a time per `Transcriber`: the queue
-    /// is serial and dictation owns its own instance.
+    /// it expects one transcription at a time per `Transcriber`; the queue
+    /// is serial.
     private func transcribe(
         file url: URL,
         with engine: ParakeetTranscriber,

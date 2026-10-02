@@ -5,16 +5,20 @@ import CryptoKit
 enum LibraryBackup {
     static let itemNames = ["library", "saved-people.json", "voice-profiles.json"]
     static let preferenceKeys: Set<String> = [
-        "language", "translate", "selectedModel", "microphoneSpeakerName", "expectedRemoteSpeakerCount",
+        "language", "translate", "selectedModel", "unloadIdleModelMinutes", "microphoneSpeakerName", "expectedRemoteSpeakerCount",
         "preferredInputDeviceUID", "preferredOutputDeviceUID", "automaticSpeakerRecognition", "speakerDetectionModel", "voiceRecognitionEnabled",
         "manualAutoStopEnabled", "meetingMuteSyncEnabled", "callDetectionEnabled", "recordingAppShortcuts", "recordingVideoEnabled", "recordingVideoMode",
         "textReplacementRules", "replacementCaseSensitive", "replacementWholeWords", "removeFillerWords",
-        "dictationEnabled", "dictationCleanupEnabled", "dictationCleanupBackend", "dictationCleanupOllamaModel",
         "aiProvider", "aiModel", "aiModel.anthropic", "aiModel.openai", "aiOllamaModel", "aiModel.claudeCode", "aiModel.codex", "aiModel.cursor", "summaryPrompt", "watchAutoTranscribe", "watchAutoExport",
         "watchExportFormats", "watchedFolders", "watchSeenSignatures", "calendarSyncEnabled", "calendarLeadMinutes",
         "calendarSelectedIDs", "calendarOnlyWithLinks", "autoRecordEnabled", "autoRecordCalendarIDs",
         "autoRecordLateJoinMinutes", "autoRecordGraceMinutes", "autoRecordSilenceMinutes", "autoRecordEventOverrides",
         "autoRecordConsentShown", "autoRecordStoreEventDetails"
+    ]
+    /// Settings of removed features. Older backups may contain them, so they
+    /// still validate, but restore drops them.
+    static let retiredPreferenceKeys: Set<String> = [
+        "dictationEnabled", "dictationCleanupEnabled", "dictationCleanupBackend", "dictationCleanupOllamaModel",
     ]
     static var supportURL: URL { LibraryStore.baseURL.deletingLastPathComponent() }
 
@@ -261,8 +265,10 @@ enum LibraryBackup {
     private static func readPreferences(_ url: URL) throws -> [String: Any] {
         try requireRegularFile(url)
         guard let values = try PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String: Any],
-              Set(values.keys).isSubset(of: preferenceKeys) else { throw BackupError.message("The backup preferences are invalid.") }
-        return values
+              Set(values.keys).isSubset(of: preferenceKeys.union(retiredPreferenceKeys)) else {
+            throw BackupError.message("The backup preferences are invalid.")
+        }
+        return values.filter { !retiredPreferenceKeys.contains($0.key) }
     }
     private static func applyPreferences(_ values: [String: Any], defaults: UserDefaults, domain: String) {
         SummarySettings(defaults: defaults).captureLegacyProvider()

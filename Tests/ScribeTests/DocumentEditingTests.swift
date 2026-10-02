@@ -310,7 +310,7 @@ final class DocumentEditingTests: XCTestCase {
 
     @MainActor
     func testCommitSegmentEditRejectsUnequalWordCounts() throws {
-        // "get hub" collapsing into "github" is a real correction DictationDiff
+        // "get hub" collapsing into "github" is a real correction CorrectionDiff
         // reports, but the view has always rejected unequal word counts. This
         // pins that existing behavior rather than changing it.
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

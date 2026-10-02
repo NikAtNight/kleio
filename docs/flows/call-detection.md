@@ -9,9 +9,9 @@ The September 15, 2026 user request asks for a small bottom-left popup when a ca
 - Two consecutive joined-call observations show one prompt without activating Kleio. An open app, unrelated audio, muted microphone, or unreadable call controls cannot substitute for joined-call evidence.
 - Audio captures the detected application's audio and the microphone, regardless of the saved video toggle. Audio + screen opens the native display picker first. Browser audio includes all audible tabs.
 - Dismissing suppresses that call. Unknown observations preserve dismissal. Ten seconds of observed native inactivity or an explicit browser prejoin screen rearms that call. Process exit clears its history. New call contexts can prompt independently, while switching back to a dismissed context preserves its dismissal.
-- An existing recording consumes the detected call without prompting. Dictation, backup work, and calendar countdowns defer prompts. Multiple detected calls do not select an arbitrary app.
+- An existing recording consumes the detected call without prompting. Backup work and calendar countdowns defer prompts. Multiple detected calls do not select an arbitrary app.
 - A failed start offers another attempt with the error in the popup. Cancelling the display picker creates no recording and restores the choices. A stale popup rechecks the same app and call context before starting.
-- Settings → General → Recording can disable prompts and open Accessibility settings. Detection defaults on, but does not request or grant Accessibility access automatically. No audio is captured by detection.
+- Settings → Call Detection can disable prompts and open Accessibility settings. Detection defaults on, but does not request or grant Accessibility access automatically. No audio is captured by detection.
 
 Tests selected for these boundaries are `CallPromptTests`, `MeetingMuteReaderTests`, `MeetingReaderAccessibilityTests`, and `RecordingSessionLifecycleTests`. Native Accessibility behavior, popup focus/placement, and actual screen selection require separate acceptance.
 

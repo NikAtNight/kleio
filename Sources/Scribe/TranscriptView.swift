@@ -176,7 +176,7 @@ struct TranscriptView: View {
                     NSWorkspace.shared.open(library.folder(for: document.id))
                 }
             } else {
-                Button("Open AI Settings") { openSettings() }
+                Button("Open AI Settings") { SettingsPane.select(.ai); openSettings() }
             }
             Button("OK", role: .cancel) {}
         } message: {
@@ -512,7 +512,7 @@ struct TranscriptView: View {
             }
             .help(SummaryService.isConfigured
                   ? "Generate an AI summary"
-                  : "Choose a summary provider in Settings → AI")
+                  : "Choose a summary provider in Settings → AI Summaries")
             .disabled(summaryRequestBlocked || document.segments.isEmpty)
         }
     }

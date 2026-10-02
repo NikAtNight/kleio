@@ -83,7 +83,7 @@ final class AutoRecordArbiterTests: XCTestCase {
         XCTAssertEqual(core.phase, .recording(meeting))
     }
 
-    func testCountdownWaitsWhileDictationOrBackupBlocksThenStarts() {
+    func testCountdownWaitsWhileBlockedThenStarts() {
         var core = AutoRecordArbiterCore()
         let meeting = event()
         let deadline = advanceToCountdown(&core, event: meeting).addingTimeInterval(configuration.countdownSeconds)

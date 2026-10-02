@@ -43,7 +43,7 @@ actor SpeakerDiarizer {
         var errorDescription: String? {
             switch self {
             case .modelsMissing(let model):
-                return "Download \(model.title) in Settings to analyze speakers, then retry speaker analysis."
+                return "Download \(model.title) in Settings → Speakers to analyze speakers, then retry speaker analysis."
             case .invalidSpeakerCount:
                 return "The remote speaker count must be at least one."
             case .sortformerSpeakerLimit:

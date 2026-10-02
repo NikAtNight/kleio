@@ -238,35 +238,6 @@ private struct MeetingMuteStatusView: View {
     }
 }
 
-struct LevelMeter: View {
-    let label: String
-    let icon: String
-    let level: Float
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Label(label, systemImage: icon)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(width: 170, alignment: .leading)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.08))
-                    Capsule()
-                        .fill(meterColor)
-                        .frame(width: max(6, geo.size.width * CGFloat(level)))
-                        .animation(.linear(duration: 0.12), value: level)
-                }
-            }
-            .frame(height: 8)
-        }
-    }
-
-    private var meterColor: Color {
-        level > 0.85 ? .orange : .green
-    }
-}
-
 /// Keeps capture controls accessible while browsing previous recordings.
 struct RecordingStatusBar: View {
     @EnvironmentObject private var recording: RecordingSession

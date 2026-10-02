@@ -14,7 +14,7 @@ final class RecordingSessionLifecycleTests: XCTestCase {
             { await $0.startUsingPreferences(mode: .meeting, library: $1, calendarEvent: event) },
             { await $0.startAutoRecording(for: event, library: $1, storeCalendarDetails: true) },
         ]
-        for reason in ["Finish dictation first.", "Finish the backup first."] {
+        for reason in ["Finish the import first.", "Finish the backup first."] {
             for start in starts {
                 let fixture = try Fixture()
                 let driver = SyntheticCaptureDriver()

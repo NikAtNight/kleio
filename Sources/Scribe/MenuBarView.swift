@@ -7,7 +7,6 @@ struct MenuBarView: View {
     @EnvironmentObject private var queue: TranscriptionQueue
     @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var appState: AppState
-    @EnvironmentObject private var dictation: DictationController
     @EnvironmentObject private var calendarSync: CalendarSync
     @Environment(\.openWindow) private var openWindow
 
@@ -16,34 +15,6 @@ struct MenuBarView: View {
             Text("Next: \(nextMeeting.title) at \(nextMeeting.start.formatted(date: .omitted, time: .shortened))")
             if let joinURL = nextMeeting.joinURL {
                 Button("Join") { NSWorkspace.shared.open(joinURL) }
-            }
-            Divider()
-        }
-
-        if dictation.enabled {
-            switch dictation.phase {
-            case .idle:
-                Button {
-                    dictation.toggle()
-                } label: {
-                    Label("Start Dictation  ⌥Space", systemImage: "mic")
-                }
-            case .preparing:
-                Label("Preparing Dictation…", systemImage: "mic")
-            case .recording:
-                Button {
-                    dictation.toggle()
-                } label: {
-                    Label("Finish Dictation  ⌥Space", systemImage: "stop.circle.fill")
-                }
-                Button("Cancel Dictation", role: .destructive) {
-                    dictation.cancelRecording()
-                }
-            case .transcribing:
-                Label("Transcribing Dictation…", systemImage: "ellipsis.circle")
-            }
-            if let message = dictation.lastMessage {
-                Text(message)
             }
             Divider()
         }
@@ -74,7 +45,6 @@ struct MenuBarView: View {
                 } label: {
                     Label(mode.title, systemImage: mode.icon)
                 }
-                .disabled(dictation.phase != .idle)
             }
         }
 

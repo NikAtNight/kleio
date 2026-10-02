@@ -167,7 +167,6 @@ struct ScribeApp: App {
     @StateObject private var replacementStore = ReplacementStore()
     @StateObject private var watchFolders = WatchFolderManager()
     @StateObject private var importer = Importer()
-    @StateObject private var dictation = DictationController()
     @StateObject private var calendarSync = CalendarSync()
     @StateObject private var autoRecordArbiter = AutoRecordArbiter()
     @StateObject private var callDetection = CallDetectionController()
@@ -184,7 +183,6 @@ struct ScribeApp: App {
                 .environmentObject(replacementStore)
                 .environmentObject(watchFolders)
                 .environmentObject(importer)
-                .environmentObject(dictation)
                 .environmentObject(calendarSync)
                 .onAppear {
                     queue.configure(
@@ -196,19 +194,9 @@ struct ScribeApp: App {
                     summaries.configure(library: library)
                     importer.startBlocked = { [weak backups = backups] in backups?.isWorking == true }
                     watchFolders.configure(library: library, queue: queue, importer: importer)
-                    recording.configureStartAvailability { [weak dictation = dictation, weak backups = backups] in
-                        if let dictation, dictation.phase != .idle { return "Finish dictation before starting a recording." }
-                        if backups?.isWorking == true { return "Finish the backup or restore before starting a recording." }
-                        return nil
+                    recording.configureStartAvailability { [weak backups = backups] in
+                        backups?.isWorking == true ? "Finish the backup or restore before starting a recording." : nil
                     }
-                    dictation.startBlockReason = { [weak backups = backups] in
-                        backups?.isWorking == true ? "Finish the backup or restore before starting dictation." : nil
-                    }
-                    dictation.configure(
-                        modelManager: modelManager,
-                        replacements: replacementStore,
-                        recordingSession: recording
-                    )
                     appDelegate.onOpenFiles = { urls in
                         Task {
                             let ids = await importer.importFiles(urls, library: library, queue: queue)
@@ -217,10 +205,10 @@ struct ScribeApp: App {
                     }
                     appDelegate.onCommandURL = { command in
                         KleioURLCommandHandler(recording: recording, library: library, queue: queue,
-                                               dictation: dictation, appState: appState).handle(command)
+                                               appState: appState).handle(command)
                     }
                     appDelegate.hasBackgroundWork = {
-                        importer.isBusy || queue.isBusy || summaries.isBusy || backups.isWorking || dictation.phase != .idle
+                        importer.isBusy || queue.isBusy || summaries.isBusy || backups.isWorking
                     }
                     appDelegate.recording = recording
                     appDelegate.finishRecording = {
@@ -229,7 +217,6 @@ struct ScribeApp: App {
                         let transcriptSaved = await queue.prepareToQuit()
                         let summariesSaved = await summaries.prepareToQuit()
                         let backupFinished = await backups.prepareToQuit()
-                        await dictation.prepareToQuit()
                         let saved = !recording.isBusy && !importer.isBusy && !queue.isBusy && !summaries.isBusy && !backups.isWorking
                             && transcriptSaved && summariesSaved && backupFinished
                         if !saved { importer.resumeAfterCancelledQuit() }
@@ -244,13 +231,13 @@ struct ScribeApp: App {
                         recording: recording,
                         library: library,
                         queue: queue,
-                        startBlocked: { dictation.phase != .idle || backups.isWorking },
+                        startBlocked: { backups.isWorking },
                         callPresence: { callDetection.presence(for: $0) }
                     )
                     callDetection.configure(recording: recording, library: library,
                         presentationBlocked: {
                             if case .countdown = autoRecordArbiter.phase { return true }
-                            return dictation.phase != .idle || backups.isWorking
+                            return backups.isWorking
                         },
                         didStart: { appState.select(document: $0) }
                     )
@@ -278,12 +265,9 @@ struct ScribeApp: App {
                 .environmentObject(summaries)
                 .environmentObject(recording)
                 .environmentObject(appState)
-                .environmentObject(dictation)
                 .environmentObject(calendarSync)
         } label: {
-            Image(systemName: recording.isRecording
-                  ? "record.circle.fill"
-                  : (dictation.phase == .recording ? "mic.circle.fill" : "scroll"))
+            Image(systemName: recording.isRecording ? "record.circle.fill" : "scroll")
         }
 
         Settings {
@@ -298,9 +282,9 @@ struct ScribeApp: App {
                 .environmentObject(replacementStore)
                 .environmentObject(watchFolders)
                 .environmentObject(importer)
-                .environmentObject(dictation)
                 .environmentObject(calendarSync)
         }
+        .windowResizability(.contentMinSize)
         .restorationBehavior(.disabled)
     }
 }

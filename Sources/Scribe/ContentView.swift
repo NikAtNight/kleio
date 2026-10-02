@@ -7,7 +7,6 @@ struct ContentView: View {
     @EnvironmentObject private var queue: TranscriptionQueue
     @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var appState: AppState
-    @EnvironmentObject private var dictation: DictationController
     @EnvironmentObject private var importer: Importer
     @StateObject private var playback = PlaybackController()
 
@@ -38,21 +37,7 @@ struct ContentView: View {
         .searchable(text: $searchText, placement: .sidebar, prompt: "Search transcripts")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                if dictation.enabled {
-                    Button {
-                        dictation.toggle()
-                    } label: {
-                        Label(
-                            dictation.phase == .recording ? "Finish Dictation" : "Dictate",
-                            systemImage: dictation.phase == .recording ? "stop.circle.fill" : "mic.badge.plus"
-                        )
-                        .foregroundStyle(dictation.phase == .recording ? Color.red : Color.primary)
-                    }
-                    .disabled(dictation.phase == .preparing || dictation.phase == .transcribing)
-                    .help("System-wide dictation (⌥Space)")
-                }
                 RecordMenu()
-                    .disabled(dictation.phase != .idle)
                 Menu {
                     Button {
                         appState.presentImporter(.files)
@@ -310,16 +295,36 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                SettingsLink {
-                    Label("Settings", systemImage: "gearshape")
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            SidebarSettingsButton()
+        }
+    }
+}
+
+/// Pinned below the sidebar list, aligned with the rows above it.
+private struct SidebarSettingsButton: View {
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            SettingsLink {
+                HStack(spacing: 8) {
+                    Image(systemName: "gearshape")
+                        .frame(width: 20)
+                    Text("Settings")
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                Spacer()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(hovering ? Color.primary.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .help("Open Settings (⌘,)")
         }
     }
 }
@@ -443,7 +448,6 @@ struct HomeView: View {
     @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var modelManager: ModelManager
     @EnvironmentObject private var appState: AppState
-    @EnvironmentObject private var dictation: DictationController
     @EnvironmentObject private var calendarSync: CalendarSync
     @StateObject private var shortcuts = AppShortcutStore()
     @Environment(\.openSettings) private var openSettings
@@ -459,36 +463,35 @@ struct HomeView: View {
     @State private var outputDevices = AudioDevices.outputDevices()
     @State private var showCaptureSettings = false
 
-    private var canStart: Bool {
-        !recording.isBusy && dictation.phase == .idle
-    }
+    private var canStart: Bool { !recording.isBusy }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 30) {
+            VStack(alignment: .leading, spacing: 28) {
                 header
-                VStack(alignment: .leading, spacing: 16) {
-                    captureOptions
-                    shortcutsSection
+                VStack(alignment: .leading, spacing: 12) {
+                    recordCard
+                    speakerSetupNotices
                 }
+                quickActions
 
                 if calendarSync.isEnabled && calendarSync.upcomingMeetings.contains(where: {
                     Calendar.current.isDateInToday($0.start)
                 }) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Up next").font(.title3.bold())
+                        sectionTitle("Up next")
                         UpNextStrip()
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("Recent recordings").font(.title3.bold())
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionTitle("Recent recordings")
                     if recentDocuments.isEmpty {
                         ContentUnavailableView("Your recordings live here", systemImage: "waveform",
-                            description: Text("Choose an app above, record a voice memo, or open a file."))
+                            description: Text("Choose an app above, record a voice memo, or import a file."))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 20)
-                            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 18))
+                            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
                     } else {
                         LazyVStack(spacing: 0) {
                             ForEach(Array(recentDocuments.enumerated()), id: \.element.id) { index, document in
@@ -496,13 +499,14 @@ struct HomeView: View {
                                 RecentDocumentCard(document: document)
                             }
                         }
-                        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 20))
-                        .clipShape(RoundedRectangle(cornerRadius: 20))
+                        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
                     }
                 }
             }
-            .padding(32)
-            .frame(maxWidth: 1040, alignment: .leading)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 28)
+            .frame(maxWidth: 1000, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -511,75 +515,117 @@ struct HomeView: View {
         }
     }
 
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title).font(.title3.weight(.semibold))
+    }
+
+    // MARK: Header
+
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Home").font(Theme.displayTitle())
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Home").font(Theme.displayTitle(size: 28))
                 Label("Record and transcribe on this Mac", systemImage: "lock.shield")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
-            Menu {
-                ForEach(TranscriptionModelEngine.allCases, id: \.self) { engine in
-                    let models = ModelManager.catalog.filter { $0.engine == engine && modelManager.isDownloaded($0.variant) }
-                    if !models.isEmpty {
-                        Section(engine.title) {
-                            ForEach(models) { model in
-                                Button {
-                                    modelManager.selectedVariant = model.variant
-                                } label: {
-                                    if model.variant == modelManager.selectedVariant {
-                                        Label(model.displayName, systemImage: "checkmark")
-                                    } else { Text(model.displayName) }
-                                }
+            modelMenu
+        }
+    }
+
+    private var modelMenu: some View {
+        Menu {
+            ForEach(TranscriptionModelEngine.allCases, id: \.self) { engine in
+                let models = ModelManager.catalog.filter { $0.engine == engine && modelManager.isDownloaded($0.variant) }
+                if !models.isEmpty {
+                    Section(engine.title) {
+                        ForEach(models) { model in
+                            Button {
+                                modelManager.selectedVariant = model.variant
+                            } label: {
+                                if model.variant == modelManager.selectedVariant {
+                                    Label(model.displayName, systemImage: "checkmark")
+                                } else { Text(model.displayName) }
                             }
                         }
                     }
                 }
-                Divider()
-                Button("Manage models…") { openSettings() }
-            } label: {
-                Label(ModelManager.info(for: modelManager.selectedVariant)?.displayName ?? "Choose model",
-                      systemImage: "cpu")
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .foregroundStyle(.secondary)
-            .padding(.top, 8)
+            Divider()
+            Button("Manage Models…") { SettingsPane.select(.models); openSettings() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "cpu")
+                Text(ModelManager.info(for: modelManager.selectedVariant)?.displayName ?? "Choose model")
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .font(.callout.weight(.medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Theme.cardBackground, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
         }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Transcription model")
     }
 
-    private var captureOptions: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 24) {
-                    microphoneOptions
-                    Spacer(minLength: 16)
-                    videoOptions
+    // MARK: Record card
+
+    private var recordCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                deviceSummary
+                Spacer(minLength: 12)
+                videoOptions
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Record an app").font(.headline)
+                    Spacer()
+                    Text("App audio + your microphone. Browsers include all audible tabs.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading, spacing: 18) {
-                    microphoneOptions
-                    videoOptions
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96, maximum: 150), spacing: 12)],
+                          alignment: .leading, spacing: 12) {
+                    ForEach(shortcuts.shortcuts) { shortcut in
+                        Button { start(.meeting, shortcut: shortcut) } label: {
+                            AppTile(title: shortcut.name) {
+                                Image(nsImage: shortcut.icon).resizable().frame(width: 38, height: 38)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canStart)
+                        .help("Record \(shortcut.name) audio and your microphone")
+                        .contextMenu {
+                            if let url = shortcut.applicationURL {
+                                Button("Open \(shortcut.name)") { NSWorkspace.shared.openApplication(at: url, configuration: .init()) }
+                            }
+                            Button("Remove Shortcut", role: .destructive) { shortcuts.remove(shortcut) }
+                        }
+                    }
+                    Button(action: addShortcut) {
+                        AppTile(title: "Add app", dashed: true) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 38, height: 38)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Add an app you record often")
                 }
             }
             .padding(18)
-            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 18))
-            if speakerModel == "sortformer", speakerCount != 1, !(2...4).contains(speakerCount) {
-                Label("Choose 2 to 4 other people for Sortformer, or change the model in Settings.", systemImage: "exclamationmark.triangle")
-                    .font(.callout).foregroundStyle(.orange)
-            }
-            if speakerCount != 1, !SpeakerDiarizer.modelsReady(for: SpeakerDetectionModel(rawValue: speakerModel) ?? .community1) {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.down.circle")
-                    Text("Set up speaker detection")
-                    Spacer(minLength: 8)
-                    Button("Open Settings") { openSettings() }.buttonStyle(.link)
-                }
-                .font(.callout).foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
-            }
         }
-        .disabled(!canStart)
+        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
     }
 
     /// A disconnected choice falls back to the system default when recording starts.
@@ -587,75 +633,81 @@ struct HomeView: View {
         devices.first { $0.uid == uid }?.name ?? "System default"
     }
 
-    private var microphoneOptions: some View {
+    private var participantsLabel: String {
+        speakerCount == 1 ? "1 other person" : speakerCount > 1 ? "\(speakerCount) other people" : "Auto-detect speakers"
+    }
+
+    private var deviceSummary: some View {
         Button { showCaptureSettings.toggle() } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "mic.fill")
-                    .font(.system(size: 18)).foregroundStyle(.tint)
-                    .frame(width: 36, height: 36)
-                    .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Microphone · \(microphoneName.isEmpty ? "Me" : microphoneName)")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(speakerCount == 1 ? "One other person" : speakerCount > 1 ? "\(speakerCount) other people" : "Detect other speakers automatically")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                    Text("\(deviceName(inputUID, in: devices)) · \(deviceName(outputUID, in: outputDevices))")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                }
-                Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 14) {
+                deviceChip("mic.fill", deviceName(inputUID, in: devices))
+                deviceChip("headphones", deviceName(outputUID, in: outputDevices))
+                deviceChip("person.2.fill", participantsLabel)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!canStart)
         .help("Choose your microphone, headset, and number of other participants")
-        .popover(isPresented: $showCaptureSettings, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("Recording options").font(.headline)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Microphone").font(.callout.weight(.medium))
-                    Picker("Microphone", selection: $inputUID) {
-                        Text("System default").tag("")
-                        ForEach(devices) { Text($0.name).tag($0.uid) }
-                    }.labelsHidden()
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Headset or speakers").font(.callout.weight(.medium))
-                    Picker("Headset or speakers", selection: $outputUID) {
-                        Text("System default").tag("")
-                        ForEach(outputDevices) { Text($0.name).tag($0.uid) }
-                    }.labelsHidden()
-                    Text("Choose the device your call plays on.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Other participants").font(.callout.weight(.medium))
-                    RemoteSpeakerCountPicker(selection: $speakerCount).labelsHidden()
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Follow meeting mute", isOn: $meetingMuteSyncEnabled)
-                    Text("Native test mode. Requires Accessibility access and a meeting app shortcut. When the control cannot be read, microphone saving pauses. Background browser tabs may be unavailable.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("Not yet verified in live calls. Leave off until testing.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if meetingMuteSyncEnabled {
-                        Button("Open Accessibility Settings") {
-                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        }.controlSize(.regular)
-                    }
-                }
-                Text("Your microphone is always you. Choose one other person to keep all remote speech under one name.")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            .controlSize(.large)
-            .padding(22)
-            .frame(width: 340)
+        .popover(isPresented: $showCaptureSettings, arrowEdge: .bottom) { captureSettings }
+    }
+
+    private func deviceChip(_ icon: String, _ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).foregroundStyle(.tint).frame(width: 16)
+            Text(text).lineLimit(1)
         }
+        .font(.callout)
+    }
+
+    private var captureSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Recording options").font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Microphone").font(.callout.weight(.medium))
+                Picker("Microphone", selection: $inputUID) {
+                    Text("System default").tag("")
+                    ForEach(devices) { Text($0.name).tag($0.uid) }
+                }.labelsHidden()
+                Text("Labelled as \(microphoneName.isEmpty ? "Me" : microphoneName) in transcripts.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Headset or speakers").font(.callout.weight(.medium))
+                Picker("Headset or speakers", selection: $outputUID) {
+                    Text("System default").tag("")
+                    ForEach(outputDevices) { Text($0.name).tag($0.uid) }
+                }.labelsHidden()
+                Text("Choose the device your call plays on.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Other participants").font(.callout.weight(.medium))
+                RemoteSpeakerCountPicker(selection: $speakerCount).labelsHidden()
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Follow meeting mute", isOn: $meetingMuteSyncEnabled)
+                Text("Native test mode. Requires Accessibility access and a meeting app shortcut. When the control cannot be read, microphone saving pauses. Background browser tabs may be unavailable.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Not yet verified in live calls. Leave off until testing.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if meetingMuteSyncEnabled {
+                    Button("Open Accessibility Settings") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }.controlSize(.regular)
+                }
+            }
+        }
+        .controlSize(.large)
+        .padding(22)
+        .frame(width: 340)
     }
 
     private var videoOptions: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             if videoEnabled {
                 Picker("Video source", selection: $videoMode) {
                     Text("Window").tag("window")
@@ -665,75 +717,54 @@ struct HomeView: View {
             }
             Toggle(isOn: $videoEnabled) {
                 Label("Video", systemImage: videoEnabled ? "video.fill" : "video")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.callout.weight(.medium))
             }
-            .toggleStyle(.switch).fixedSize()
+            .toggleStyle(.switch).controlSize(.small).fixedSize()
             .help("Also record a window or display chosen with the macOS picker")
         }
+        .disabled(!canStart)
     }
 
-    private var shortcutsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Choose an app to record").font(.system(size: 14, weight: .semibold))
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 92), spacing: 12), count: min(5, shortcuts.shortcuts.count + 1)), spacing: 12) {
-                ForEach(shortcuts.shortcuts) { shortcut in
-                    Button { start(.meeting, shortcut: shortcut) } label: {
-                        shortcutLabel(title: shortcut.name) {
-                            Image(nsImage: shortcut.icon).resizable().frame(width: 42, height: 42)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canStart)
-                    .help("Record \(shortcut.name) audio and your microphone")
-                    .contextMenu {
-                        if let url = shortcut.applicationURL {
-                            Button("Open \(shortcut.name)") { NSWorkspace.shared.openApplication(at: url, configuration: .init()) }
-                        }
-                        Button("Remove shortcut", role: .destructive) { shortcuts.remove(shortcut) }
-                    }
-                }
-                Button(action: addShortcut) {
-                    shortcutLabel(title: "Add app") {
-                        Image(systemName: "plus").font(.system(size: 22, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 42, height: 42)
-                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                    }
-                }.buttonStyle(.plain)
+    @ViewBuilder
+    private var speakerSetupNotices: some View {
+        if speakerModel == "sortformer", speakerCount != 1, !(2...4).contains(speakerCount) {
+            Label("Choose 2 to 4 other people for Sortformer, or change the model in Settings → Speakers.", systemImage: "exclamationmark.triangle")
+                .font(.callout).foregroundStyle(.orange)
+                .padding(.horizontal, 4)
+        }
+        if speakerCount != 1, !SpeakerDiarizer.modelsReady(for: SpeakerDetectionModel(rawValue: speakerModel) ?? .community1) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle")
+                Text("Download a speaker model to tell remote voices apart.")
+                Spacer(minLength: 8)
+                Button("Open Settings") { SettingsPane.select(.speakers); openSettings() }.buttonStyle(.link)
             }
-            Text("App audio + your microphone. Browsers include all audible tabs.")
-                .font(.system(size: 12)).foregroundStyle(.secondary)
-                .padding(.vertical, 2)
-
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 10)], spacing: 10) {
-                Button { start(.microphoneOnly) } label: { Label("Voice memo", systemImage: "mic") }
-                    .disabled(!canStart)
-                Button { start(.meeting) } label: { Label("All Mac audio", systemImage: "desktopcomputer") }
-                    .disabled(!canStart)
-                    .help("Record all Mac audio and your microphone")
-                Button { appState.presentImporter(.files) } label: { Label("Open files", systemImage: "folder") }
-                Menu("More") {
-                    Button("Podcast speaker tracks…") { appState.presentImporter(.podcast) }
-                    Button("All Mac audio only") { start(.systemOnly) }.disabled(!canStart)
-                    Button(dictation.enabled ? "Start dictation" : "Enable dictation") {
-                        if dictation.enabled { dictation.toggle() }
-                        else { dictation.setEnabled(true, promptForAccessibility: true) }
-                    }.disabled(!canStart)
-                }
-            }
-            .controlSize(.large)
+            .font(.callout).foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
         }
     }
 
-    private func shortcutLabel<Icon: View>(title: String, @ViewBuilder icon: () -> Icon) -> some View {
-        VStack(spacing: 12) {
-            icon().frame(height: 42)
-            Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+    // MARK: Quick actions
+
+    private var quickActions: some View {
+        Grid(horizontalSpacing: 12, verticalSpacing: 12) {
+            GridRow {
+                QuickActionTile(title: "Voice memo", subtitle: "Microphone only", icon: "mic.fill", tint: .orange) {
+                    start(.microphoneOnly)
+                }
+                .disabled(!canStart)
+                QuickActionTile(title: "All Mac audio", subtitle: "Every app + mic", icon: "desktopcomputer", tint: .blue) {
+                    start(.meeting)
+                }
+                .disabled(!canStart)
+                QuickActionTile(title: "Import files", subtitle: "Audio or video", icon: "square.and.arrow.down", tint: .green) {
+                    appState.presentImporter(.files)
+                }
+                QuickActionTile(title: "Podcast tracks", subtitle: "One file per speaker", icon: "person.2.wave.2.fill", tint: .purple) {
+                    appState.presentImporter(.podcast)
+                }
+            }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 108)
-        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 16))
-        .contentShape(RoundedRectangle(cornerRadius: 16))
     }
 
     private func start(_ mode: RecordingMode, shortcut: RecordingApplication? = nil) {
@@ -759,6 +790,80 @@ struct HomeView: View {
 
     private var recentDocuments: [ScribeDocument] {
         Array(library.documents.sorted { $0.createdAt > $1.createdAt }.prefix(12))
+    }
+}
+
+/// One app shortcut inside the record card.
+private struct AppTile<Icon: View>: View {
+    let title: String
+    var dashed = false
+    @ViewBuilder let icon: Icon
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(spacing: 8) {
+            icon.frame(height: 38)
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .foregroundStyle(dashed ? .secondary : .primary)
+        }
+        .padding(.vertical, 14)
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity)
+        .background {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(dashed ? Color.clear : Color.primary.opacity(hovering && isEnabled ? 0.08 : 0.04))
+        }
+        .overlay {
+            if dashed {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.secondary.opacity(hovering ? 0.6 : 0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            }
+        }
+        .opacity(isEnabled ? 1 : 0.5)
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// Equal-size secondary ways to start, below the record card.
+private struct QuickActionTile: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let tint: Color
+    let action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 34, height: 34)
+                    .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius)
+                .strokeBorder(Color.accentColor.opacity(hovering && isEnabled ? 0.35 : 0)))
+            .opacity(isEnabled ? 1 : 0.5)
+            .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 

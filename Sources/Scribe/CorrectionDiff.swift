@@ -2,7 +2,7 @@ import Foundation
 
 /// Finds word substitutions a user made while editing a transcript segment.
 /// Insertions and deletions are editing choices, not reliable recognition fixes.
-enum DictationDiff {
+enum CorrectionDiff {
     private static let commonWords: Set<String> = [
         "a", "an", "the", "and", "or", "but", "so", "if", "then", "than",
         "is", "are", "was", "were", "be", "been", "am", "do", "does", "did",

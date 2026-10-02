@@ -1,9 +1,9 @@
 import XCTest
 @testable import Scribe
 
-final class DictationDiffTests: XCTestCase {
+final class CorrectionDiffTests: XCTestCase {
     func testLearnsASingleMisheardWord() {
-        let proposals = DictationDiff.proposedCorrections(
+        let proposals = CorrectionDiff.proposedCorrections(
             original: "I pushed the change to talex today",
             edited: "I pushed the change to Talix today"
         )
@@ -13,7 +13,7 @@ final class DictationDiffTests: XCTestCase {
     }
 
     func testLearnsSeveralFixesInOnePass() {
-        let proposals = DictationDiff.proposedCorrections(
+        let proposals = CorrectionDiff.proposedCorrections(
             original: "deploy kubernets from get hub actions",
             edited: "deploy kubernetes from github actions"
         )
@@ -23,26 +23,26 @@ final class DictationDiffTests: XCTestCase {
     }
 
     func testIgnoresCommonWordsAndFormattingOnlyEdits() {
-        XCTAssertTrue(DictationDiff.proposedCorrections(
+        XCTAssertTrue(CorrectionDiff.proposedCorrections(
             original: "send the report to finance",
             edited: "send a report to finance"
         ).isEmpty)
-        XCTAssertTrue(DictationDiff.proposedCorrections(
+        XCTAssertTrue(CorrectionDiff.proposedCorrections(
             original: "shipped the release",
             edited: "Shipped the release."
         ).isEmpty)
     }
 
     func testIgnoresInsertionsAndEmptyInput() {
-        XCTAssertTrue(DictationDiff.proposedCorrections(
+        XCTAssertTrue(CorrectionDiff.proposedCorrections(
             original: "ship the feature",
             edited: "ship the whole feature"
         ).isEmpty)
-        XCTAssertTrue(DictationDiff.proposedCorrections(original: "", edited: "anything").isEmpty)
+        XCTAssertTrue(CorrectionDiff.proposedCorrections(original: "", edited: "anything").isEmpty)
     }
 
     func testDeduplicatesRepeatedMishearings() {
-        let proposals = DictationDiff.proposedCorrections(
+        let proposals = CorrectionDiff.proposedCorrections(
             original: "talex and talex again",
             edited: "Talix and Talix again"
         )

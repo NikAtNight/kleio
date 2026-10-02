@@ -195,7 +195,7 @@ enum DocumentEditing {
         }
     }
 
-    /// Saves edited segment text and returns the dictation corrections
+    /// Saves edited segment text and returns the word corrections
     /// eligible to suggest to the user, or nil when the current suggestions
     /// should be left alone (the text did not change, there weren't 1-3
     /// corrections, or the edit changed the word count).
@@ -213,7 +213,7 @@ enum DocumentEditing {
         guard let oldText = try updateSegmentText(
             text, segmentID: segmentID, documentID: documentID, library: library
         ) else { return nil }
-        let corrections = DictationDiff.proposedCorrections(original: oldText, edited: text)
+        let corrections = CorrectionDiff.proposedCorrections(original: oldText, edited: text)
         guard (1...3).contains(corrections.count),
               oldText.split(whereSeparator: { $0.isWhitespace }).count
                 == text.split(whereSeparator: { $0.isWhitespace }).count else { return nil }

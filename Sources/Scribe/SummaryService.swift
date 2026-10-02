@@ -66,22 +66,22 @@ enum SummaryService {
             switch self {
             case .noKey:
                 if SummaryService.provider == .ollama {
-                    return "Choose an Ollama model in Settings → AI."
+                    return "Choose an Ollama model in Settings → AI Summaries."
                 }
                 if let cli = SummaryService.provider.subscriptionCLI {
-                    return "Install the \(cli.displayName) CLI and sign in, then try again. See Settings → AI."
+                    return "Install the \(cli.displayName) CLI and sign in, then try again. See Settings → AI Summaries."
                 }
-                return "No API key configured. Add one in Settings → AI."
+                return "No API key configured. Add one in Settings → AI Summaries."
             case .badResponse(let detail):
                 return "The AI request failed: \(detail)"
             case .unsuitableModel:
-                return "s1-mini cleans up dictation and cannot summarize meetings. Choose a general-purpose instruction model in Settings → AI. You can keep using s1-mini for dictation cleanup."
+                return "s1-mini is a text-cleanup model and can't summarize meetings. Choose a general-purpose instruction model in Settings → AI Summaries."
             case .invalidOutput(let detail):
-                return "The summary wasn't saved. \(detail) Try again or choose another summary model in Settings → AI."
+                return "The summary wasn't saved. \(detail) Try again or choose another summary model in Settings → AI Summaries."
             case .emptyTranscript:
                 return "There is no transcript to summarize yet."
             case .promptTooLong:
-                return "The summary instructions are too long for this model. Shorten the summary prompt in Settings → AI."
+                return "The summary instructions are too long for this model. Shorten the summary prompt in Settings → AI Summaries."
             case .transcriptChanged:
                 return "The transcript or summary changed while this summary was being generated. Generate it again to use the latest version."
             }
@@ -106,8 +106,9 @@ enum SummaryService {
     /// from this at roughly 0.3 words per token, leaving room for Markdown.
     static let defaultMaxOutputTokens = 1_536
 
+    /// s1-mini (installed by LocalFlow) only rewrites short transcripts.
     static func supportsSummaries(model: String) -> Bool {
-        !S1MiniCleanup.matches(model: model)
+        !model.lowercased().contains("s1-mini")
     }
 
     static var provider: Provider {

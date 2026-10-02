@@ -1,145 +1,136 @@
 import SwiftUI
 
-struct SettingsView: View {
-    var body: some View {
-        TabView {
-            GeneralSettings()
-                .tabItem { Label("General", systemImage: "gearshape") }
-            ModelSettings()
-                .tabItem { Label("Models", systemImage: "cpu") }
-            CalendarSettingsView()
-                .tabItem { Label("Calendar", systemImage: "calendar") }
-            ReplacementSettings()
-                .tabItem { Label("Cleanup", systemImage: "text.badge.checkmark") }
-            WatchFolderSettings()
-                .tabItem { Label("Watch Folders", systemImage: "folder.badge.gearshape") }
-            DictationSettings()
-                .tabItem { Label("Dictation", systemImage: "text.cursor") }
-            AISettings()
-                .tabItem { Label("AI", systemImage: "sparkles") }
+/// Settings pages, grouped the way the sidebar shows them.
+enum SettingsPane: String, CaseIterable, Identifiable {
+    case audio, calls, speakers
+    case models, language, cleanup, watchFolders
+    case calendar, ai
+    case library
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .audio: return "Audio Devices"
+        case .calls: return "Call Detection"
+        case .speakers: return "Speakers"
+        case .models: return "Models"
+        case .language: return "Language"
+        case .cleanup: return "Find & Replace"
+        case .watchFolders: return "Watch Folders"
+        case .calendar: return "Calendar"
+        case .ai: return "AI Summaries"
+        case .library: return "Library & Backup"
         }
-        .frame(width: 660, height: 500)
+    }
+
+    var icon: String {
+        switch self {
+        case .audio: return "mic.fill"
+        case .calls: return "phone.fill"
+        case .speakers: return "person.2.fill"
+        case .models: return "cpu.fill"
+        case .language: return "globe"
+        case .cleanup: return "text.badge.checkmark"
+        case .watchFolders: return "folder.fill"
+        case .calendar: return "calendar"
+        case .ai: return "sparkles"
+        case .library: return "externaldrive.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .audio: return .pink
+        case .calls: return .green
+        case .speakers: return .orange
+        case .models: return .blue
+        case .language: return .teal
+        case .cleanup: return .indigo
+        case .watchFolders: return .cyan
+        case .calendar: return .red
+        case .ai: return .purple
+        case .library: return .gray
+        }
+    }
+
+    /// The open page. Writing it before `openSettings()` opens that page.
+    static let storageKey = "settingsPane"
+
+    static func select(_ pane: SettingsPane) {
+        UserDefaults.standard.set(pane.rawValue, forKey: storageKey)
+    }
+
+    static let groups: [(title: String, panes: [SettingsPane])] = [
+        ("Recording", [.audio, .calls, .speakers]),
+        ("Transcription", [.models, .language, .cleanup, .watchFolders]),
+        ("Integrations", [.calendar, .ai]),
+        ("Library", [.library]),
+    ]
+}
+
+struct SettingsView: View {
+    @AppStorage(SettingsPane.storageKey) private var selection: SettingsPane = .audio
+
+    var body: some View {
+        // A plain split keeps the sidebar a fixed, readable width;
+        // NavigationSplitView ignored its column width in this window.
+        HStack(spacing: 0) {
+            List(selection: $selection) {
+                ForEach(SettingsPane.groups, id: \.title) { group in
+                    Section(group.title) {
+                        ForEach(group.panes) { pane in
+                            Label {
+                                Text(pane.title)
+                            } icon: {
+                                Image(systemName: pane.icon)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 22, height: 22)
+                                    .background(pane.tint.gradient, in: RoundedRectangle(cornerRadius: 6))
+                            }
+                            .tag(pane)
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .frame(width: 215)
+            Divider()
+            pane(selection)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .navigationTitle(selection.title)
+        .frame(minWidth: 780, idealWidth: 860, minHeight: 540, idealHeight: 640)
+    }
+
+    @ViewBuilder
+    private func pane(_ pane: SettingsPane) -> some View {
+        switch pane {
+        case .audio: AudioSettings()
+        case .calls: CallSettings()
+        case .speakers: SpeakerSettings()
+        case .models: ModelSettings()
+        case .language: LanguageSettings()
+        case .cleanup: ReplacementSettings()
+        case .watchFolders: WatchFolderSettings()
+        case .calendar: CalendarSettingsView()
+        case .ai: AISettings()
+        case .library: LibrarySettings()
+        }
     }
 }
 
-struct DictationSettings: View {
-    @EnvironmentObject private var dictation: DictationController
-    @State private var accessibilityGranted = false
-    @AppStorage("dictationCleanupEnabled") private var cleanupEnabled = false
-    @AppStorage("dictationCleanupBackend") private var cleanupBackend = TranscriptCleaner.preferredBackend.rawValue
-    @AppStorage("dictationCleanupOllamaModel") private var ollamaModel = TranscriptCleaner.defaultOllamaModel
-    @State private var ollamaModels: [String] = []
-
-    private var selectedCleanupBackend: TranscriptCleaner.Backend {
-        TranscriptCleaner.selectedBackend(
-            preference: TranscriptCleaner.Backend(rawValue: cleanupBackend) ?? .ollama
-        )
-    }
+/// A grouped-form footnote. Keeps explanatory text visually quieter than controls.
+struct SettingsNote: View {
+    let text: String
+    init(_ text: String) { self.text = text }
 
     var body: some View {
-        Form {
-            Toggle(
-                "Enable system-wide dictation",
-                isOn: Binding(
-                    get: { dictation.enabled },
-                    set: { dictation.setEnabled($0, promptForAccessibility: $0) }
-                )
-            )
-
-            LabeledContent("Shortcut:") {
-                Text("⌥ Space")
-                    .font(.body.monospaced())
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.07)))
-            }
-
-            LabeledContent("Automatic paste:") {
-                HStack {
-                    Label(
-                        accessibilityGranted ? "Allowed" : "Needs Accessibility permission",
-                        systemImage: accessibilityGranted ? "checkmark.circle.fill" : "exclamationmark.circle"
-                    )
-                    .foregroundStyle(accessibilityGranted ? Color.green : Color.orange)
-                    if !accessibilityGranted {
-                        Button("Allow…") {
-                            dictation.requestAccessibility()
-                            dictation.openAccessibilitySettings()
-                        }
-                    }
-                }
-            }
-
-            LabeledContent("Status:", value: dictation.statusText)
-
-            Toggle("Clean up dictation with a local model", isOn: $cleanupEnabled)
-
-            if cleanupEnabled {
-                Picker("Backend:", selection: $cleanupBackend) {
-                    if AppleIntelligenceCleaner.isAvailable {
-                        Text(TranscriptCleaner.Backend.appleIntelligence.displayName)
-                            .tag(TranscriptCleaner.Backend.appleIntelligence.rawValue)
-                    }
-                    Text(TranscriptCleaner.Backend.ollama.displayName)
-                        .tag(TranscriptCleaner.Backend.ollama.rawValue)
-                }
-
-                if selectedCleanupBackend == .ollama {
-                    if !ollamaModels.isEmpty {
-                        Picker("Ollama model:", selection: $ollamaModel) {
-                            Text("Choose a model").tag("")
-                            ForEach(ollamaModels, id: \.self) { installedModel in
-                                Text(installedModel).tag(installedModel)
-                            }
-                        }
-                    } else {
-                        TextField("Ollama model:", text: $ollamaModel)
-                    }
-                }
-
-                Text("Runs entirely on this Mac. scripts/setup-s1-mini.sh registers the recommended model.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if dictation.phase == .recording {
-                LevelMeter(label: "Microphone", icon: "mic.fill", level: dictation.level)
-                HStack {
-                    Button("Finish & Insert") { dictation.toggle() }
-                        .buttonStyle(.borderedProminent)
-                    Button("Cancel", role: .destructive) { dictation.cancelRecording() }
-                }
-            } else {
-                Button("Start Dictation") {
-                    if !dictation.enabled {
-                        dictation.setEnabled(true, promptForAccessibility: true)
-                    }
-                    dictation.toggle()
-                }
-                .disabled(dictation.phase != .idle)
-            }
-
-            Text("Dictation records only while the shortcut is active, transcribes with your selected local model, applies Cleanup rules, and inserts the result into the app you were using. Without Accessibility permission, the result is copied to the clipboard instead.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .formStyle(.grouped)
-        .onAppear { accessibilityGranted = dictation.isAccessibilityGranted }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            accessibilityGranted = dictation.isAccessibilityGranted
-        }
-        .task(id: "\(cleanupEnabled)-\(cleanupBackend)") {
-            if cleanupBackend == TranscriptCleaner.Backend.appleIntelligence.rawValue,
-               !AppleIntelligenceCleaner.isAvailable {
-                cleanupBackend = TranscriptCleaner.Backend.ollama.rawValue
-                return
-            }
-            guard cleanupEnabled, selectedCleanupBackend == .ollama else {
-                ollamaModels = []
-                return
-            }
-            ollamaModels = await OllamaClient().installedModels()
-        }
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -147,53 +138,63 @@ struct ReplacementSettings: View {
     @EnvironmentObject private var replacements: ReplacementStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Form {
+        Form {
+            Section {
                 Toggle("Remove filler words (um, uh, erm)", isOn: $replacements.removeFillerWords)
                 Toggle("Case sensitive", isOn: $replacements.caseSensitive)
                 Toggle("Only replace separate words", isOn: $replacements.wholeWords)
             }
-            .formStyle(.grouped)
 
-            HStack {
-                Text("Global replacements")
-                    .font(.headline)
-                Spacer()
-                Button("Import…", action: importRules)
-                Button("Export…", action: exportRules)
-                Button {
-                    replacements.addRule()
-                } label: {
-                    Label("Add", systemImage: "plus")
+            Section {
+                if replacements.rules.isEmpty {
+                    Text("No replacements yet. Add names or terms the model keeps mishearing.")
+                        .foregroundStyle(.secondary)
                 }
-            }
-
-            List {
                 ForEach($replacements.rules) { $rule in
                     HStack(spacing: 10) {
-                        TextField("Original", text: $rule.original)
+                        TextField("Original", text: $rule.original, prompt: Text("Heard as"))
+                            .labelsHidden()
                         Image(systemName: "arrow.right")
                             .foregroundStyle(.tertiary)
-                        TextField("Replacement", text: $rule.replacement)
+                        TextField("Replacement", text: $rule.replacement, prompt: Text("Replace with"))
+                            .labelsHidden()
+                        Button {
+                            // Commit any in-progress edit first: a field still
+                            // editing the removed row would write to the wrong rule.
+                            let id = rule.id
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            DispatchQueue.main.async { replacements.rules.removeAll { $0.id == id } }
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove this replacement")
                     }
                 }
-                .onDelete(perform: replacements.deleteRules)
-            }
-            .overlay {
-                if replacements.rules.isEmpty {
-                    ContentUnavailableView(
-                        "No replacements",
-                        systemImage: "arrow.left.arrow.right",
-                        description: Text("Add common names or terms that Whisper consistently mishears.")
-                    )
+            } header: {
+                HStack {
+                    Text("Replacements")
+                    Spacer()
+                    Menu {
+                        Button("Import…", action: importRules)
+                        Button("Export…", action: exportRules)
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    Button {
+                        replacements.addRule()
+                    } label: {
+                        Label("Add", systemImage: "plus")
+                    }
+                    .controlSize(.small)
                 }
+            } footer: {
+                SettingsNote("Applied automatically to new recording, file, podcast, and watch-folder transcripts. Editing a word in a transcript can also suggest a replacement.")
             }
-
-            Text("Cleanup is applied automatically to new file, recording, podcast, watch-folder, and dictation transcripts.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-        .padding(20)
+        .formStyle(.grouped)
     }
 
     private func exportRules() {
@@ -227,21 +228,12 @@ struct WatchFolderSettings: View {
     @EnvironmentObject private var watcher: WatchFolderManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Watched folders").font(.headline)
-                    Text("New audio and video files are queued after they finish copying.")
-                        .font(.caption)
+        Form {
+            Section {
+                if watcher.folders.isEmpty {
+                    Text("No watched folders. Add one to turn incoming recordings into transcripts automatically.")
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Button(action: chooseFolder) {
-                    Label("Add Folder", systemImage: "plus")
-                }
-            }
-
-            List {
                 ForEach(watcher.folders) { folder in
                     HStack {
                         Image(systemName: "folder.fill").foregroundStyle(.tint)
@@ -257,27 +249,29 @@ struct WatchFolderSettings: View {
                         Button(role: .destructive) {
                             watcher.removeFolder(folder)
                         } label: {
-                            Image(systemName: "trash")
+                            Image(systemName: "minus.circle")
                         }
                         .buttonStyle(.borderless)
+                        .help("Stop watching this folder")
                     }
                 }
-            }
-            .frame(minHeight: 170)
-            .overlay {
-                if watcher.folders.isEmpty {
-                    ContentUnavailableView(
-                        "No watched folders",
-                        systemImage: "folder.badge.plus",
-                        description: Text("Add a folder to turn incoming recordings into transcripts automatically.")
-                    )
+            } header: {
+                HStack {
+                    Text("Folders")
+                    Spacer()
+                    Button(action: chooseFolder) {
+                        Label("Add Folder", systemImage: "plus")
+                    }
+                    .controlSize(.small)
                 }
+            } footer: {
+                SettingsNote("New audio and video files are queued after they finish copying.")
             }
 
-            Form {
+            Section {
                 Toggle("Automatically transcribe new files", isOn: $watcher.autoTranscribe)
                 Toggle("Export finished transcripts beside the source", isOn: $watcher.autoExport)
-                LabeledContent("Export formats:") {
+                LabeledContent("Export formats") {
                     HStack(spacing: 12) {
                         ForEach([ExportFormat.txt, .md, .html, .srt, .vtt], id: \.self) { format in
                             Toggle(format.rawValue.uppercased(), isOn: formatBinding(format))
@@ -287,12 +281,11 @@ struct WatchFolderSettings: View {
                 }
                 .disabled(!watcher.autoExport)
                 if let last = watcher.lastImportedFile {
-                    LabeledContent("Last imported:", value: last)
+                    LabeledContent("Last imported", value: last)
                 }
             }
-            .formStyle(.grouped)
         }
-        .padding(20)
+        .formStyle(.grouped)
     }
 
     private func formatBinding(_ format: ExportFormat) -> Binding<Bool> {
@@ -319,90 +312,30 @@ struct WatchFolderSettings: View {
     }
 }
 
-struct GeneralSettings: View {
-    @EnvironmentObject private var callDetection: CallDetectionController
-    @AppStorage("language") private var language = ""
-    @AppStorage("translate") private var translate = false
-    @AppStorage("automaticSpeakerRecognition") private var automaticSpeakerRecognition = false
-    @AppStorage("microphoneSpeakerName") private var microphoneName = "Me"
-    @AppStorage("expectedRemoteSpeakerCount") private var speakerCount = 0
+struct AudioSettings: View {
     @AppStorage("preferredInputDeviceUID") private var preferredInputDeviceUID = ""
     @AppStorage(AudioDevices.preferredOutputDeviceUIDKey) private var preferredOutputDeviceUID = ""
-    @AppStorage("manualAutoStopEnabled") private var manualAutoStopEnabled = false
     @State private var inputDevices = AudioDevices.inputDevices()
     @State private var outputDevices = AudioDevices.outputDevices()
 
-    private static let languages: [(code: String, name: String)] = [
-        ("", "Auto-detect"), ("en", "English"), ("es", "Spanish"), ("fr", "French"),
-        ("de", "German"), ("it", "Italian"), ("pt", "Portuguese"), ("nl", "Dutch"),
-        ("ja", "Japanese"), ("zh", "Chinese"), ("ko", "Korean"), ("ru", "Russian"),
-        ("hi", "Hindi"), ("ar", "Arabic"), ("tr", "Turkish"), ("pl", "Polish"),
-        ("uk", "Ukrainian"), ("sv", "Swedish"),
-    ]
-
     var body: some View {
         Form {
-            Picker("Microphone:", selection: $preferredInputDeviceUID) {
-                Text(systemDefaultLabel).tag("")
-                ForEach(inputDevices) { device in
-                    Text(device.name).tag(device.uid)
+            Section {
+                Picker("Microphone", selection: $preferredInputDeviceUID) {
+                    Text(systemDefaultLabel).tag("")
+                    ForEach(inputDevices) { device in
+                        Text(device.name).tag(device.uid)
+                    }
                 }
-            }
-            Picker("Headset or speakers:", selection: $preferredOutputDeviceUID) {
-                Text(systemDefaultOutputLabel).tag("")
-                ForEach(outputDevices) { device in
-                    Text(device.name).tag(device.uid)
+                Picker("Headset or speakers", selection: $preferredOutputDeviceUID) {
+                    Text(systemDefaultOutputLabel).tag("")
+                    ForEach(outputDevices) { device in
+                        Text(device.name).tag(device.uid)
+                    }
                 }
+            } footer: {
+                SettingsNote("App audio is recorded through the output your call plays on. Kleio doesn't change your Mac's sound settings. A Bluetooth headset's microphone lowers its audio quality, so a separate microphone works best with one.")
             }
-            Text("App audio is recorded through this output. Choose the device your call plays on. Kleio doesn't change your Mac's sound settings. A Bluetooth headset's microphone lowers its audio quality, so a separate microphone works best with one.")
-                .font(.caption).foregroundStyle(.secondary)
-
-            Picker("Spoken language:", selection: $language) {
-                ForEach(Self.languages, id: \.code) { lang in
-                    Text(lang.name).tag(lang.code)
-                }
-            }
-            .help("Auto-detect works well; setting it explicitly is faster and more accurate. English-only models always use English. Parakeet models stop with an error if they don't support the chosen language.")
-
-            Toggle("Translate to English", isOn: $translate)
-                .help("Transcribe non-English audio directly into English text. Whisper models only.")
-
-            Section("Speakers") {
-                TextField("My microphone name:", text: $microphoneName)
-                RemoteSpeakerCountPicker(selection: $speakerCount)
-                Text("Meeting recordings keep your microphone separate and detect the other speakers. Choose one other person to skip speaker-count guessing.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle("Also detect speakers in imported files", isOn: $automaticSpeakerRecognition)
-                Text("Rename and merge people in a transcript. Saved names stay on this Mac; corrections never change a voice fingerprint.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("Recording") {
-                Toggle("Ask to record when a call is detected", isOn: $callDetection.enabled)
-                Text("Shows a bottom-left prompt with Audio and Audio + screen. Detection needs Accessibility access and readable call controls.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if callDetection.enabled && !callDetection.accessibilityGranted {
-                    Button("Open Accessibility Settings…") { callDetection.openAccessibilitySettings() }
-                }
-                Toggle("End meeting recordings when the call ends", isOn: $manualAutoStopEnabled)
-
-                Text("Applies to recordings you start yourself. Kleio stops about 15 seconds after you leave the call (needs call detection above), when the meeting app closes, or when both sides stay silent for a few minutes.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            LibraryBackupSettings()
-
-            LabeledContent("Library:") {
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([LibraryStore.baseURL])
-                }
-            }
-
-            Text("Recording, transcription, and speaker detection run locally. AI summaries use the provider you select in AI settings.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
         .onAppear {
@@ -433,30 +366,145 @@ struct GeneralSettings: View {
     }
 }
 
+struct CallSettings: View {
+    @EnvironmentObject private var callDetection: CallDetectionController
+    @AppStorage("manualAutoStopEnabled") private var manualAutoStopEnabled = false
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Ask to record when a call is detected", isOn: $callDetection.enabled)
+                if callDetection.enabled && !callDetection.accessibilityGranted {
+                    LabeledContent("Accessibility access") {
+                        Button("Open Settings…") { callDetection.openAccessibilitySettings() }
+                    }
+                }
+            } footer: {
+                SettingsNote("Shows a prompt in the bottom-left corner with Audio and Audio + screen. Detection needs Accessibility access and readable call controls.")
+            }
+
+            Section {
+                Toggle("End meeting recordings when the call ends", isOn: $manualAutoStopEnabled)
+            } footer: {
+                SettingsNote("Applies to recordings you start yourself. Kleio stops about 15 seconds after you leave the call (needs call detection above), when the meeting app closes, or when both sides stay silent for a few minutes.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct SpeakerSettings: View {
+    @AppStorage("microphoneSpeakerName") private var microphoneName = "Me"
+    @AppStorage("expectedRemoteSpeakerCount") private var speakerCount = 0
+    @AppStorage("automaticSpeakerRecognition") private var automaticSpeakerRecognition = false
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("My microphone name", text: $microphoneName)
+                RemoteSpeakerCountPicker(selection: $speakerCount)
+            } footer: {
+                SettingsNote("Your microphone is always you. Choose one other person to keep all remote speech under one name and skip speaker-count guessing.")
+            }
+
+            Section {
+                SpeakerModelSettings()
+                Toggle("Also detect speakers in imported files", isOn: $automaticSpeakerRecognition)
+            } header: {
+                Text("Speaker detection")
+            } footer: {
+                SettingsNote("Rename and merge people in a transcript. Saved names stay on this Mac; corrections never change a voice fingerprint.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct LanguageSettings: View {
+    @AppStorage("language") private var language = ""
+    @AppStorage("translate") private var translate = false
+
+    private static let languages: [(code: String, name: String)] = [
+        ("", "Auto-detect"), ("en", "English"), ("es", "Spanish"), ("fr", "French"),
+        ("de", "German"), ("it", "Italian"), ("pt", "Portuguese"), ("nl", "Dutch"),
+        ("ja", "Japanese"), ("zh", "Chinese"), ("ko", "Korean"), ("ru", "Russian"),
+        ("hi", "Hindi"), ("ar", "Arabic"), ("tr", "Turkish"), ("pl", "Polish"),
+        ("uk", "Ukrainian"), ("sv", "Swedish"),
+    ]
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Spoken language", selection: $language) {
+                    ForEach(Self.languages, id: \.code) { lang in
+                        Text(lang.name).tag(lang.code)
+                    }
+                }
+            } footer: {
+                SettingsNote("Auto-detect works well; setting it explicitly is faster and more accurate. English-only models always use English. Parakeet models stop with an error if they don't support the chosen language.")
+            }
+
+            Section {
+                Toggle("Translate to English", isOn: $translate)
+            } footer: {
+                SettingsNote("Transcribes non-English audio directly into English text. Whisper models only.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct LibrarySettings: View {
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Recordings folder") {
+                    Button("Reveal in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([LibraryStore.baseURL])
+                    }
+                }
+            } footer: {
+                SettingsNote("Recording, transcription, and speaker detection run on this Mac. AI summaries use the provider you choose in AI Summaries.")
+            }
+
+            LibraryBackupSettings()
+        }
+        .formStyle(.grouped)
+    }
+}
+
 struct ModelSettings: View {
     @EnvironmentObject private var modelManager: ModelManager
     @AppStorage(Transcriber.idleUnloadMinutesKey) private var idleUnloadMinutes = Transcriber.defaultIdleUnloadMinutes
+    @State private var showsMoreWhisper = false
+
+    /// Shown up front; the remaining Whisper builds sit behind a disclosure.
+    private static let featuredWhisper: Set<String> = [
+        "openai_whisper-small.en", "openai_whisper-large-v3-v20240930",
+        "openai_whisper-large-v3-v20240930_626MB",
+    ]
+
+    private var downloaded: [TranscriptionModelInfo] {
+        ModelManager.catalog.filter { modelManager.isDownloaded($0.variant) }
+    }
+
+    private func available(_ engine: TranscriptionModelEngine) -> [TranscriptionModelInfo] {
+        ModelManager.catalog.filter { $0.engine == engine && !modelManager.isDownloaded($0.variant) }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            List {
-                ForEach(TranscriptionModelEngine.allCases, id: \.self) { engine in
-                    Section {
-                        ForEach(ModelManager.catalog.filter { $0.engine == engine }) { model in
-                            ModelRow(model: model)
-                        }
-                    } header: {
-                        Text(engine.title)
-                    } footer: {
-                        Text(engine.summary).font(.caption).foregroundStyle(.secondary)
+        Form {
+            Section {
+                Picker("Transcription model", selection: $modelManager.selectedVariant) {
+                    ForEach(downloaded) { model in
+                        Text(model.displayName).tag(model.variant)
+                    }
+                    if !downloaded.contains(where: { $0.variant == modelManager.selectedVariant }) {
+                        Text(ModelManager.displayName(for: modelManager.selectedVariant))
+                            .tag(modelManager.selectedVariant)
                     }
                 }
-            }
-            .listStyle(.inset)
-            .frame(minHeight: 180)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Picker("Unload model when idle", selection: $idleUnloadMinutes) {
+                Picker("Unload when idle", selection: $idleUnloadMinutes) {
                     Text("Never").tag(0)
                     Text("After 1 minute").tag(1)
                     Text("After 5 minutes").tag(5)
@@ -464,20 +512,47 @@ struct ModelSettings: View {
                     Text("After 30 minutes").tag(30)
                     Text("After 1 hour").tag(60)
                 }
-                Text("Frees the model's memory after a stretch with no transcription or dictation. The next job reloads it, which takes a few seconds.")
-                    .font(.caption).foregroundStyle(.secondary)
+            } header: {
+                Text("In use")
+            } footer: {
+                SettingsNote("Used for meetings, imports, and watch folders. Unloading frees the model's memory after a stretch with no transcription; the next job reloads it in a few seconds.")
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
 
-            SpeakerModelSettings()
-                .padding(.horizontal, 16)
+            if !downloaded.isEmpty {
+                Section("Downloaded") {
+                    ForEach(downloaded) { ModelRow(model: $0) }
+                }
+            }
 
-            Text("Parakeet v3 is the fastest choice for most calls. Whisper Large v3 Turbo is the accuracy sweet spot when you need vocabulary hints, translation, or a language Parakeet doesn't cover. Compressed builds trade a little accuracy for a smaller download.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(12)
+            let parakeet = available(.parakeet)
+            if !parakeet.isEmpty {
+                Section {
+                    ForEach(parakeet) { ModelRow(model: $0) }
+                } header: {
+                    Text("Parakeet")
+                } footer: {
+                    SettingsNote(TranscriptionModelEngine.parakeet.summary)
+                }
+            }
+
+            let whisper = available(.whisper)
+            if !whisper.isEmpty {
+                Section {
+                    ForEach(whisper.filter { Self.featuredWhisper.contains($0.variant) }) { ModelRow(model: $0) }
+                    let more = whisper.filter { !Self.featuredWhisper.contains($0.variant) }
+                    if !more.isEmpty {
+                        DisclosureGroup("More Whisper models (\(more.count))", isExpanded: $showsMoreWhisper) {
+                            ForEach(more) { ModelRow(model: $0) }
+                        }
+                    }
+                } header: {
+                    Text("Whisper")
+                } footer: {
+                    SettingsNote(TranscriptionModelEngine.whisper.summary + " Compressed builds trade a little accuracy for a smaller download.")
+                }
+            }
         }
+        .formStyle(.grouped)
     }
 }
 
@@ -492,41 +567,38 @@ struct SpeakerModelSettings: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Divider()
-            HStack {
-                Picker("Speaker detection", selection: $selectedModel) {
-                    Text("Community-1").tag("community1")
-                    Text("Sortformer · experimental").tag("sortformer")
-                }
-                Spacer()
-                if downloading {
-                    ProgressView().controlSize(.small)
-                } else if ready {
-                    Label("Ready offline", systemImage: "checkmark.circle").foregroundStyle(.secondary)
-                } else {
-                    Button("Download") {
-                        downloading = true
-                        error = nil
-                        Task {
-                            do { try await SpeakerDiarizer().prepareModels(for: model) }
-                            catch { self.error = error.localizedDescription }
-                            ready = SpeakerDiarizer.modelsReady(for: model)
-                            downloading = false
-                        }
-                    }
-                }
-            }.disabled(downloading)
-            Text(model == .sortformer
-                 ? "Experimental option for 2 to 4 other participants. It may still split voices; the chosen count does not force an exact number of groups. Use Community-1 for automatic counting or larger calls."
-                 : "Local speaker grouping for meetings and imported audio. A known participant count helps prevent false splits.")
-                .font(.caption).foregroundStyle(.secondary)
-            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+        Picker("Model", selection: $selectedModel) {
+            Text("Community-1").tag("community1")
+            Text("Sortformer (experimental)").tag("sortformer")
         }
+        .disabled(downloading)
         .onChange(of: selectedModel, initial: true) { _, _ in
             ready = SpeakerDiarizer.modelsReady(for: model)
             error = nil
         }
+        LabeledContent("Status") {
+            if downloading {
+                ProgressView().controlSize(.small)
+            } else if ready {
+                Label("Ready offline", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else {
+                Button("Download") {
+                    downloading = true
+                    error = nil
+                    Task {
+                        do { try await SpeakerDiarizer().prepareModels(for: model) }
+                        catch { self.error = error.localizedDescription }
+                        ready = SpeakerDiarizer.modelsReady(for: model)
+                        downloading = false
+                    }
+                }
+            }
+        }
+        SettingsNote(model == .sortformer
+             ? "Experimental option for 2 to 4 other participants. It may still split voices; the chosen count does not force an exact number of groups. Use Community-1 for automatic counting or larger calls."
+             : "Local speaker grouping for meetings and imported audio. A known participant count helps prevent false splits.")
+        if let error { Text(error).font(.caption).foregroundStyle(.red) }
     }
 }
 
@@ -539,46 +611,62 @@ struct ModelRow: View {
     private var progress: Double? { modelManager.downloadProgress[model.variant] }
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                if isDownloaded { modelManager.selectedVariant = model.variant }
-            } label: {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
-            .disabled(!isDownloaded)
-            .help(isDownloaded ? "Use this model" : "Download the model first")
-
+        HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.displayName).font(.body.weight(isSelected ? .semibold : .regular))
+                HStack(spacing: 6) {
+                    Text(model.displayName)
+                    if isDownloaded {
+                        Text(model.engine.title)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                    }
+                }
                 Text(model.detail).font(.caption).foregroundStyle(.secondary)
             }
 
-            Spacer()
+            Spacer(minLength: 12)
 
             Text(model.sizeString)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            if let progress {
-                ProgressView(value: progress)
-                    .frame(width: 80)
-                    .controlSize(.small)
-            } else if isDownloaded {
-                Button("Delete") {
-                    modelManager.delete(model.variant)
+            Group {
+                if let progress {
+                    ProgressView(value: progress)
+                        .frame(width: 72)
+                } else if isDownloaded {
+                    HStack(spacing: 8) {
+                        if isSelected {
+                            Label("In use", systemImage: "checkmark.circle.fill")
+                                .labelStyle(.titleAndIcon)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.tint)
+                        } else {
+                            Button("Use") { modelManager.selectedVariant = model.variant }
+                        }
+                        Button {
+                            modelManager.delete(model.variant)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Delete \(model.displayName)")
+                        .disabled(isSelected && modelManager.downloadedVariants.count == 1)
+                    }
+                } else {
+                    Button {
+                        Task { await modelManager.download(model.variant) }
+                    } label: {
+                        Label("Download", systemImage: "arrow.down.circle")
+                    }
                 }
-                .controlSize(.small)
-                .disabled(isSelected && modelManager.downloadedVariants.count == 1)
-            } else {
-                Button("Download") {
-                    Task { await modelManager.download(model.variant) }
-                }
-                .controlSize(.small)
             }
+            .controlSize(.small)
+            .frame(minWidth: 96, alignment: .trailing)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 2)
     }
 }
 
@@ -626,90 +714,93 @@ struct AISettings: View {
 
     var body: some View {
         Form {
-            Picker("Provider:", selection: Binding(get: { provider }, set: { value in
-                // Pin legacy settings to the old selection before switching.
-                summarySettings.captureLegacyProvider()
-                provider = value
-            })) {
-                ForEach(SummaryService.Provider.allCases) { p in
-                    Text(p.displayName).tag(p.rawValue)
+            Section {
+                Picker("Provider", selection: Binding(get: { provider }, set: { value in
+                    // Pin legacy settings to the old selection before switching.
+                    summarySettings.captureLegacyProvider()
+                    provider = value
+                })) {
+                    ForEach(SummaryService.Provider.allCases) { p in
+                        Text(p.displayName).tag(p.rawValue)
+                    }
                 }
-            }
 
-            if selectedProvider.usesAPIKey {
-                SecureField("API key:", text: $apiKeyDraft)
-                HStack {
-                    Button(apiKeyDraft.isEmpty ? "Remove Key" : "Save Key") { saveAPIKey() }
-                        .disabled(apiKeyDraft == savedAPIKey)
-                    Text(apiKeyDraft != savedAPIKey ? "Unsaved key"
-                         : savedAPIKey.isEmpty ? "No key saved" : "Stored in Keychain")
-                        .font(.caption).foregroundStyle(.secondary)
+                if selectedProvider.usesAPIKey {
+                    SecureField("API key", text: $apiKeyDraft)
+                    HStack {
+                        Button(apiKeyDraft.isEmpty ? "Remove Key" : "Save Key") { saveAPIKey() }
+                            .disabled(apiKeyDraft == savedAPIKey)
+                        Text(apiKeyDraft != savedAPIKey ? "Unsaved key"
+                             : savedAPIKey.isEmpty ? "No key saved" : "Stored in Keychain")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
-            }
 
-            if let migrationError {
-                Text(migrationError).font(.caption).foregroundStyle(.red)
-                if selectedProvider.usesAPIKey, summarySettings.needsLegacyProvider {
-                    Button("Move Older Settings to \(selectedProvider.displayName)") {
-                        do {
-                            try summarySettings.assignLegacySettings(to: selectedProvider)
-                            loadAPIKey()
-                        } catch {
-                            self.migrationError = error.localizedDescription
+                if let migrationError {
+                    Text(migrationError).font(.caption).foregroundStyle(.red)
+                    if selectedProvider.usesAPIKey, summarySettings.needsLegacyProvider {
+                        Button("Move Older Settings to \(selectedProvider.displayName)") {
+                            do {
+                                try summarySettings.assignLegacySettings(to: selectedProvider)
+                                loadAPIKey()
+                            } catch {
+                                self.migrationError = error.localizedDescription
+                            }
                         }
                     }
                 }
-            }
-            if let credentialError {
-                Text(credentialError).font(.caption).foregroundStyle(.red)
-            }
-            if migrationError != nil || credentialError != nil {
-                Button("Retry Keychain") { loadAPIKey() }
-            }
-
-            if let cli = selectedProvider.subscriptionCLI {
-                SubscriptionCLIStatusRow(cli: cli)
-            }
-
-            if selectedProvider == .ollama, !ollamaModels.isEmpty {
-                Picker("Model:", selection: $ollamaModel) {
-                    Text("Choose a model").tag("")
-                    ForEach(ollamaModels, id: \.self) { installedModel in
-                        Text(SummaryService.supportsSummaries(model: installedModel)
-                             ? installedModel : "\(installedModel) · Dictation cleanup only")
-                            .tag(installedModel)
-                            .disabled(!SummaryService.supportsSummaries(model: installedModel))
-                    }
+                if let credentialError {
+                    Text(credentialError).font(.caption).foregroundStyle(.red)
                 }
-            } else if let cli = selectedProvider.subscriptionCLI {
-                Picker("Model:", selection: modelBinding) {
-                    Text(cli.defaultModelName).tag("")
-                    let saved = modelBinding.wrappedValue
-                    // Keep a model chosen earlier visible even if the CLI no longer lists it.
-                    if !saved.isEmpty, !cliModels.contains(where: { $0.id == saved }) {
-                        Text(saved).tag(saved)
-                    }
-                    ForEach(cliModels, id: \.self) { option in
-                        Text(option.name).tag(option.id)
-                    }
+                if migrationError != nil || credentialError != nil {
+                    Button("Retry Keychain") { loadAPIKey() }
                 }
-            } else if selectedProvider != .appleIntelligence {
-                TextField(
-                    "Model:",
-                    text: modelBinding,
-                    prompt: Text(selectedProvider.defaultModel)
-                )
+
+                if let cli = selectedProvider.subscriptionCLI {
+                    SubscriptionCLIStatusRow(cli: cli)
+                }
+
+                if selectedProvider == .ollama, !ollamaModels.isEmpty {
+                    Picker("Model", selection: $ollamaModel) {
+                        Text("Choose a model").tag("")
+                        ForEach(ollamaModels, id: \.self) { installedModel in
+                            Text(SummaryService.supportsSummaries(model: installedModel)
+                                 ? installedModel : "\(installedModel) · can't summarize")
+                                .tag(installedModel)
+                                .disabled(!SummaryService.supportsSummaries(model: installedModel))
+                        }
+                    }
+                } else if let cli = selectedProvider.subscriptionCLI {
+                    Picker("Model", selection: modelBinding) {
+                        Text(cli.defaultModelName).tag("")
+                        let saved = modelBinding.wrappedValue
+                        // Keep a model chosen earlier visible even if the CLI no longer lists it.
+                        if !saved.isEmpty, !cliModels.contains(where: { $0.id == saved }) {
+                            Text(saved).tag(saved)
+                        }
+                        ForEach(cliModels, id: \.self) { option in
+                            Text(option.name).tag(option.id)
+                        }
+                    }
+                } else if selectedProvider != .appleIntelligence {
+                    TextField(
+                        "Model",
+                        text: modelBinding,
+                        prompt: Text(selectedProvider.defaultModel)
+                    )
+                }
+
+                if selectedProvider == .ollama, !SummaryService.supportsSummaries(model: ollamaModel) {
+                    Label("s1-mini is a text-cleanup model. Choose a general-purpose model for summaries.",
+                          systemImage: "exclamationmark.circle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+            } footer: {
+                SettingsNote(privacyNote)
             }
 
-            if selectedProvider == .ollama, !SummaryService.supportsSummaries(model: ollamaModel) {
-                Label("s1-mini is for dictation cleanup. Choose a general-purpose model for summaries.",
-                      systemImage: "exclamationmark.circle")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Summary prompt:")
+            Section("Summary prompt") {
                 TextEditor(text: $prompt)
                     .font(.callout)
                     .frame(height: 110)
@@ -724,10 +815,6 @@ struct AISettings: View {
                         }
                     }
             }
-
-            Text(privacyNote)
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
         .onChange(of: provider, initial: true) { _, _ in loadAPIKey() }
@@ -776,7 +863,7 @@ private struct SubscriptionCLIStatusRow: View {
     @State private var loginError: String?
 
     var body: some View {
-        LabeledContent("Account:") {
+        LabeledContent("Account") {
             HStack(spacing: 8) {
                 switch status {
                 case nil:

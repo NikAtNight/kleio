@@ -40,7 +40,7 @@ Implemented in the native app on September 10, 2026. The existing library format
 | App setup | `ContentView.swift`, `AppShortcutStore.swift`, `SettingsView.swift`, and `Theme.swift`; the dashboard and capture code share `RecordingApplication`. |
 | Capture timing | `RecordingClock.swift` supplies audio, video, and session time. `TimelineAudioWriter` is reused by the microphone and app-audio capture paths. |
 | Video | `ScreenRecorder.swift` owns native selection/capture. `TimelineVideoWriter` separates encoding from screen hardware so generated movies can verify timing. |
-| Lifecycle and recovery | `RecordingSession.swift`, `LibraryStore.swift`, `RecordingView.swift`, `MenuBarView.swift`, `DictationController.swift`, and `ScribeApp.swift`; pending saves block conflicting operations and can be retried. |
+| Lifecycle and recovery | `RecordingSession.swift`, `LibraryStore.swift`, `RecordingView.swift`, `MenuBarView.swift`, and `ScribeApp.swift`; pending saves block conflicting operations and can be retried. |
 | Playback | `PlaybackController.swift` composes audio and optional video on one player. |
 | Speaker analysis | `SpeakerAnalysis.swift` is reused for initial processing and speaker-only retry. `SpeakerDiarizer.swift` handles local models and word alignment; `Transcriber.swift` retains word timing. |
 | Corrections | `SpeakerEditing.swift` owns normalization, merging, naming, assignment, and undo snapshots. `SavedPeopleStore.swift` persists names independently. `TranscriptView.swift` exposes those operations. |
@@ -304,5 +304,7 @@ Every recording origin now checks the same availability rule inside `RecordingSe
 Paused calendar auto-recordings suspend process-quit, scheduled-end, overlap, and silence stop checks. On resume, the silence timer excludes paused time. The calendar's scheduled end remains wall-clock time and can stop the recording on the first resumed tick. Explicit cancel and disabling auto-record still stop paused recordings.
 
 `RecordingSessionLifecycleTests.testEveryRecordingOriginRefusesConflictingWorkBeforeCapture` checks the common guard for manual, app, Join & Record, and automatic origins with temporary manifests and a fake capture driver. `DictationLifecycleTests` checks rejected starts and stale permission continuations without requesting real microphone access. `AutoRecordArbiterTests` covers long and repeated pauses, silence resuming, scheduled end, process quit, and explicit stopping.
+
+On October 2, 2026, system-wide dictation was removed from Kleio, along with `DictationController`, `TranscriptCleaner`, and `DictationLifecycleTests`. Backup and restore work is now the only thing that blocks recording starts, auto-record countdowns, and call prompts. The dictation notes above describe the earlier build.
 
 Integration tests, build evidence, and remaining native gaps are recorded in [imports, exports, and cloud settings](import-and-export.md). Existing live-call, permission, and mute-sync acceptance remains unverified for this patch. The installed app was not replaced.

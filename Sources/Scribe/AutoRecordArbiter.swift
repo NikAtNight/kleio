@@ -223,7 +223,7 @@ struct AutoRecordArbiterCore {
                 return []
             }
             guard now >= deadline else { return [] }
-            // Dictation or a backup holds the countdown open. Give up only once the meeting is over.
+            // A backup holds the countdown open. Give up only once the meeting is over.
             if startBlocked {
                 if now > event.end {
                     cancelledEventIDs.insert(event.eventID)
@@ -519,7 +519,7 @@ final class AutoRecordArbiter: ObservableObject {
         if startBlocked, case .countdown(let event, let deadline) = core.phase, now >= deadline {
             if !loggedStartWait {
                 loggedStartWait = true
-                DiagLog.log("auto-record waiting to start %@ until dictation or a backup finishes", event.eventID)
+                DiagLog.log("auto-record waiting to start %@ until a backup finishes", event.eventID)
             }
         } else {
             loggedStartWait = false

@@ -16,8 +16,8 @@ final class KleioURLCommandTests: XCTestCase {
         XCTAssertEqual(parse("KLEIO://Record/Toggle"), .toggleRecording(.meeting))
     }
 
-    func testDictationAndOpenParse() {
-        XCTAssertEqual(parse("kleio://dictation/toggle"), .toggleDictation)
+    func testRemovedDictationCommandIsRejectedAndOpenParses() {
+        XCTAssertNil(parse("kleio://dictation/toggle"))
         XCTAssertEqual(parse("kleio://open"), .open)
     }
 

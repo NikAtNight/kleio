@@ -5,14 +5,13 @@ enum KleioURLCommand: Equatable {
     case startRecording(RecordingMode)
     case stopRecording
     case toggleRecording(RecordingMode)
-    case toggleDictation
     case open
 
     static let scheme = "kleio"
 
     /// Accepted shapes:
     /// `kleio://record/start?mode=meeting|system|mic`, `kleio://record/stop`,
-    /// `kleio://record/toggle?mode=…`, `kleio://dictation/toggle`, `kleio://open`.
+    /// `kleio://record/toggle?mode=…`, `kleio://open`.
     static func parse(_ url: URL) -> KleioURLCommand? {
         guard url.scheme?.lowercased() == scheme, let host = url.host?.lowercased() else { return nil }
         let action = url.pathComponents.dropFirst().first?.lowercased()
@@ -22,7 +21,6 @@ enum KleioURLCommand: Equatable {
         case ("record", "start"): return .startRecording(mode)
         case ("record", "stop"): return .stopRecording
         case ("record", "toggle"): return .toggleRecording(mode)
-        case ("dictation", "toggle"): return .toggleDictation
         case ("open", nil): return .open
         default: return nil
         }
@@ -45,7 +43,6 @@ struct KleioURLCommandHandler {
     let recording: RecordingSession
     let library: LibraryStore
     let queue: TranscriptionQueue
-    let dictation: DictationController
     let appState: AppState
 
     func handle(_ command: KleioURLCommand) {
@@ -56,8 +53,6 @@ struct KleioURLCommandHandler {
             stop()
         case .toggleRecording(let mode):
             if recording.isRecording { stop() } else { start(mode) }
-        case .toggleDictation:
-            dictation.toggle()
         case .open:
             NSApp.activate(ignoringOtherApps: true)
         }

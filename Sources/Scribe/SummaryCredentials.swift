@@ -60,9 +60,9 @@ struct KeychainSummaryCredentialStore: SummaryCredentialStore {
             switch self {
             case .status(let status):
                 let detail = SecCopyErrorMessageString(status, nil) as String? ?? "Error \(status)"
-                return "Couldn't access the API key in Keychain. \(detail) Retry in Settings → AI."
+                return "Couldn't access the API key in Keychain. \(detail) Retry in Settings → AI Summaries."
             case .invalidData:
-                return "The API key in Keychain couldn't be read. Save the key again in Settings → AI."
+                return "The API key in Keychain couldn't be read. Save the key again in Settings → AI Summaries."
             }
         }
     }

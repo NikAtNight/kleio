@@ -54,6 +54,24 @@ final class LibraryBackupTests: XCTestCase {
         XCTAssertNil(plist["aiLegacyProvider"])
     }
 
+    func testOlderBackupWithRemovedDictationSettingsStillRestores() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (source, doc) = try fixture(dir, title: "Restored meeting")
+        let (target, _) = try fixture(dir, title: "Previous meeting")
+        let backup = dir.appendingPathComponent("snapshot.kleiobackup")
+        try LibraryBackup.create(support: source, preferences: ["language": "de", "dictationEnabled": true,
+                                                                "dictationCleanupBackend": "ollama"], at: backup)
+        let domain = "test.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        try LibraryBackup.restore(backup, support: target, defaults: defaults, domain: domain)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.appendingPathComponent("library/\(doc.id.uuidString)/document.json").path))
+        XCTAssertEqual(defaults.string(forKey: "language"), "de")
+        XCTAssertNil(defaults.object(forKey: "dictationEnabled"))
+        XCTAssertNil(defaults.object(forKey: "dictationCleanupBackend"))
+    }
+
     func testChangedMediaFailsValidationBeforeReplacingAnything() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
