@@ -452,9 +452,11 @@ struct HomeView: View {
     @AppStorage("expectedRemoteSpeakerCount") private var speakerCount = 0
     @AppStorage("microphoneSpeakerName") private var microphoneName = "Me"
     @AppStorage("preferredInputDeviceUID") private var inputUID = ""
+    @AppStorage(AudioDevices.preferredOutputDeviceUIDKey) private var outputUID = ""
     @AppStorage("meetingMuteSyncEnabled") private var meetingMuteSyncEnabled = false
     @AppStorage("speakerDetectionModel") private var speakerModel = "community1"
     @State private var devices = AudioDevices.inputDevices()
+    @State private var outputDevices = AudioDevices.outputDevices()
     @State private var showCaptureSettings = false
 
     private var canStart: Bool {
@@ -505,6 +507,7 @@ struct HomeView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             devices = AudioDevices.inputDevices()
+            outputDevices = AudioDevices.outputDevices()
         }
     }
 
@@ -572,6 +575,11 @@ struct HomeView: View {
         .disabled(!canStart)
     }
 
+    /// A disconnected choice falls back to the system default when recording starts.
+    private func deviceName(_ uid: String, in devices: [AudioDevice]) -> String {
+        devices.first { $0.uid == uid }?.name ?? "System default"
+    }
+
     private var microphoneOptions: some View {
         Button { showCaptureSettings.toggle() } label: {
             HStack(spacing: 12) {
@@ -584,13 +592,15 @@ struct HomeView: View {
                         .font(.system(size: 14, weight: .semibold))
                     Text(speakerCount == 1 ? "One other person" : speakerCount > 1 ? "\(speakerCount) other people" : "Detect other speakers automatically")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("\(deviceName(inputUID, in: devices)) · \(deviceName(outputUID, in: outputDevices))")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Choose your microphone and number of other participants")
+        .help("Choose your microphone, headset, and number of other participants")
         .popover(isPresented: $showCaptureSettings, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Recording options").font(.headline)
@@ -600,6 +610,15 @@ struct HomeView: View {
                         Text("System default").tag("")
                         ForEach(devices) { Text($0.name).tag($0.uid) }
                     }.labelsHidden()
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Headset or speakers").font(.callout.weight(.medium))
+                    Picker("Headset or speakers", selection: $outputUID) {
+                        Text("System default").tag("")
+                        ForEach(outputDevices) { Text($0.name).tag($0.uid) }
+                    }.labelsHidden()
+                    Text("Choose the device your call plays on.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Other participants").font(.callout.weight(.medium))

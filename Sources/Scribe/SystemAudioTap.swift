@@ -86,7 +86,7 @@ final class SystemAudioTap {
 
         // Give the private aggregate a hardware clock. Its default rate can
         // differ from Bluetooth output, even while the tap advertises 48 kHz.
-        let output = try defaultOutputDevice()
+        let output = try recordingOutputDevice()
         guard try inputBufferChannels(of: output.id).allSatisfy({ $0 == 0 }) else { throw TapError.ambiguousInput }
         let outputUID = output.uid
         let aggregateDescription: [String: Any] = [
@@ -292,20 +292,19 @@ final class SystemAudioTap {
         }
     }
 
-    /// The device used to clock the private aggregate and select its tap stream.
-    private func defaultOutputDevice() throws -> (id: AudioObjectID, uid: String) {
+    /// The device used to clock the private aggregate and select its tap stream:
+    /// the output chosen in Kleio, or the macOS default output.
+    private func recordingOutputDevice() throws -> (id: AudioObjectID, uid: String) {
+        guard let deviceID = AudioDevices.recordingOutputDeviceID() else {
+            throw TapError.osStatus("find output device", kAudioHardwareBadDeviceError)
+        }
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mSelector: kAudioDevicePropertyDeviceUID,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        var deviceID = AudioObjectID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        try check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID), "find output device")
-
-        address.mSelector = kAudioDevicePropertyDeviceUID
         var uid: CFString = "" as CFString
-        size = UInt32(MemoryLayout<CFString>.size)
+        var size = UInt32(MemoryLayout<CFString>.size)
         try withUnsafeMutablePointer(to: &uid) { pointer in
             try check(AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, pointer), "read output device UID")
         }
@@ -332,7 +331,7 @@ final class SystemAudioTap {
             try check(AudioObjectGetPropertyData(device, &address, 0, nil, &size, &alive), "check audio device")
             guard alive != 0 else { return false }
         }
-        return try defaultOutputDevice().id == output && nominalRate(of: output) == rate
+        return try recordingOutputDevice().id == output && nominalRate(of: output) == rate
             && nominalRate(of: aggregateID) == rate && currentStreams == streams
             && current.format == input.format && current.bufferChannels == input.bufferChannels
     }

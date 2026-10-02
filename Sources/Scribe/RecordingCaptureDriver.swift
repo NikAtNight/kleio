@@ -112,6 +112,7 @@ private final class NativeRecordingCaptureDriver: RecordingCaptureDriving {
             monitor.start()
         }
         if mode.usesSystem {
+            if mode.usesMic { await AudioDevices.waitForOutputRouteToSettle() }
             let tap = SystemAudioTap()
             self.tap = tap
             try tap.start(

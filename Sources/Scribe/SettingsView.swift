@@ -327,8 +327,10 @@ struct GeneralSettings: View {
     @AppStorage("microphoneSpeakerName") private var microphoneName = "Me"
     @AppStorage("expectedRemoteSpeakerCount") private var speakerCount = 0
     @AppStorage("preferredInputDeviceUID") private var preferredInputDeviceUID = ""
+    @AppStorage(AudioDevices.preferredOutputDeviceUIDKey) private var preferredOutputDeviceUID = ""
     @AppStorage("manualAutoStopEnabled") private var manualAutoStopEnabled = false
     @State private var inputDevices = AudioDevices.inputDevices()
+    @State private var outputDevices = AudioDevices.outputDevices()
 
     private static let languages: [(code: String, name: String)] = [
         ("", "Auto-detect"), ("en", "English"), ("es", "Spanish"), ("fr", "French"),
@@ -346,6 +348,14 @@ struct GeneralSettings: View {
                     Text(device.name).tag(device.uid)
                 }
             }
+            Picker("Headset or speakers:", selection: $preferredOutputDeviceUID) {
+                Text(systemDefaultOutputLabel).tag("")
+                ForEach(outputDevices) { device in
+                    Text(device.name).tag(device.uid)
+                }
+            }
+            Text("App audio is recorded through this output. Choose the device your call plays on. Kleio doesn't change your Mac's sound settings. A Bluetooth headset's microphone lowers its audio quality, so a separate microphone works best with one.")
+                .font(.caption).foregroundStyle(.secondary)
 
             Picker("Spoken language:", selection: $language) {
                 ForEach(Self.languages, id: \.code) { lang in
@@ -396,8 +406,8 @@ struct GeneralSettings: View {
         }
         .formStyle(.grouped)
         .onAppear {
-            refreshInputDevices()
-            AudioDevices.observeDeviceChanges { refreshInputDevices() }
+            refreshDevices()
+            AudioDevices.observeDeviceChanges { refreshDevices() }
         }
     }
 
@@ -409,8 +419,17 @@ struct GeneralSettings: View {
         return "System default (\(device.name))"
     }
 
-    private func refreshInputDevices() {
+    private var systemDefaultOutputLabel: String {
+        guard let defaultID = AudioDevices.defaultOutputDeviceID(),
+              let device = outputDevices.first(where: { $0.id == defaultID }) else {
+            return "System default"
+        }
+        return "System default (\(device.name))"
+    }
+
+    private func refreshDevices() {
         inputDevices = AudioDevices.inputDevices()
+        outputDevices = AudioDevices.outputDevices()
     }
 }
 

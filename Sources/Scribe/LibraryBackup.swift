@@ -6,7 +6,7 @@ enum LibraryBackup {
     static let itemNames = ["library", "saved-people.json", "voice-profiles.json"]
     static let preferenceKeys: Set<String> = [
         "language", "translate", "selectedModel", "microphoneSpeakerName", "expectedRemoteSpeakerCount",
-        "preferredInputDeviceUID", "automaticSpeakerRecognition", "speakerDetectionModel", "voiceRecognitionEnabled",
+        "preferredInputDeviceUID", "preferredOutputDeviceUID", "automaticSpeakerRecognition", "speakerDetectionModel", "voiceRecognitionEnabled",
         "manualAutoStopEnabled", "meetingMuteSyncEnabled", "callDetectionEnabled", "recordingAppShortcuts", "recordingVideoEnabled", "recordingVideoMode",
         "textReplacementRules", "replacementCaseSensitive", "replacementWholeWords", "removeFillerWords",
         "dictationEnabled", "dictationCleanupEnabled", "dictationCleanupBackend", "dictationCleanupOllamaModel",
