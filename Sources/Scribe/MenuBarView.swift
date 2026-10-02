@@ -76,6 +76,10 @@ struct MenuBarView: View {
     }
 
     private func openMain() {
+        // Join the Dock before the window exists. Switching the activation
+        // policy after the window is on screen can leave the sidebar laid out
+        // under the titlebar, with its search field and Home row cut off.
+        NSApp.setActivationPolicy(.regular)
         openWindow(id: "main")
         NSApp.activate(ignoringOtherApps: true)
     }
