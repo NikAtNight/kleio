@@ -106,7 +106,7 @@ enum SummaryService {
     /// from this at roughly 0.3 words per token, leaving room for Markdown.
     static let defaultMaxOutputTokens = 1_536
 
-    /// s1-mini (installed by LocalFlow) only rewrites short transcripts.
+    /// s1-mini (installed by Walkie) only rewrites short transcripts.
     static func supportsSummaries(model: String) -> Bool {
         !model.lowercased().contains("s1-mini")
     }
