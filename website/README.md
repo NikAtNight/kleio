@@ -1,6 +1,6 @@
 # Kleio website
 
-Static landing page at https://kleio-nan.pages.dev (Cloudflare Pages project `kleio-nan`). No build step or dependencies.
+Static landing page at https://kleio.talix.app (Cloudflare Worker `kleio-site`, deployed with `npx wrangler deploy`). No build step or dependencies.
 
 Preview it locally:
 
