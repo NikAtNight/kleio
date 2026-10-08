@@ -91,7 +91,7 @@ enum Main {
             // actor internally, so blocking main (semaphore) deadlocks.
             Task.detached {
                 do {
-                    ModelManager.seedFromWalkieIfAvailable()
+                    ModelManager.seedFromFloIfAvailable()
                     let transcriber = Transcriber()
                     try await transcriber.load(model: model)
                     let segments = try await transcriber.transcribe(

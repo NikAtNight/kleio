@@ -4,7 +4,7 @@ import WhisperKit
 /// Loads a local model and transcribes audio files into timestamped
 /// segments. Whisper models run through WhisperKit (argmaxinc/whisperkit-coreml
 /// registry); Parakeet models run through `ParakeetTranscriber`. Proven core
-/// adapted from Walkie.
+/// adapted from Flo.
 actor Transcriber {
     enum TranscriberError: Error, LocalizedError {
         case notLoaded

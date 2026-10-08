@@ -41,7 +41,7 @@ struct TranscriptionModelInfo: Identifiable, Hashable {
 /// and Parakeet models in .../Scribe/models/FluidAudio/.
 /// (~/Documents is deliberately avoided: iCloud "Optimize Mac Storage" can
 /// evict model files into dataless stubs — the mysterious-failure lesson
-/// learned in Walkie.)
+/// learned in Flo.)
 @MainActor
 final class ModelManager: ObservableObject {
     nonisolated static let downloadBase: URL = {
@@ -99,7 +99,7 @@ final class ModelManager: ObservableObject {
 
     init() {
         selectedVariant = UserDefaults.standard.string(forKey: "selectedModel") ?? "openai_whisper-small.en"
-        Self.seedFromWalkieIfAvailable()
+        Self.seedFromFloIfAvailable()
         refresh()
         // If the stored selection was deleted on disk, fall back to any
         // downloaded model rather than forcing a surprise download.
@@ -176,18 +176,18 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Walkie (the user's dictation app) may already have Whisper or
+    /// Flo (the user's dictation app) may already have Whisper or
     /// Parakeet models downloaded. Its folder kept the LocalFlow name when
     /// the app was renamed. Copy them over so Kleio works with no
     /// download; APFS clones the files instead of duplicating them.
     /// Static so the headless --transcribe path can seed too.
-    nonisolated static func seedFromWalkieIfAvailable() {
-        let walkie = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    nonisolated static func seedFromFloIfAvailable() {
+        let flo = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("LocalFlow/models", isDirectory: true)
-        seed(from: walkie.appendingPathComponent("argmaxinc/whisperkit-coreml", isDirectory: true), to: modelsFolder) {
+        seed(from: flo.appendingPathComponent("argmaxinc/whisperkit-coreml", isDirectory: true), to: modelsFolder) {
             $0.hasPrefix("openai_") || $0.hasPrefix("distil-")
         }
-        seed(from: walkie.appendingPathComponent("FluidAudio", isDirectory: true),
+        seed(from: flo.appendingPathComponent("FluidAudio", isDirectory: true),
              to: ParakeetTranscriber.modelsFolder) { $0.hasPrefix("parakeet") }
     }
 
@@ -200,7 +200,7 @@ final class ModelManager: ObservableObject {
             try? fm.createDirectory(at: destination, withIntermediateDirectories: true)
             do {
                 try fm.copyItem(at: source.appendingPathComponent(variant), to: dest)
-                DiagLog.log("seeded model %@ from Walkie", variant)
+                DiagLog.log("seeded model %@ from Flo", variant)
             } catch {
                 DiagLog.log("model seed failed for %@: %@", variant, error.localizedDescription)
             }

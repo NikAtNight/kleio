@@ -25,7 +25,7 @@ A native macOS meeting recorder with local transcription and speaker review. Req
   - **Parakeet** (NVIDIA, through FluidAudio): v3 for 25 European languages, v2 and 110M for English, and a Japanese model. An 11-minute recording took about 5 seconds on an M5 Pro, including model load. Parakeet has no vocabulary hints and can't translate; it stops with an error if Translate to English is on or the chosen spoken language isn't supported. Replacement rules still apply.
   - **Whisper** (OpenAI, through WhisperKit): Tiny through Large v3, Large v3 Turbo, Distil Large v3, and smaller compressed builds of Small, Large v3, Large v3 Turbo, and Distil. Whisper uses vocabulary hints and can translate to English.
   - Settings → Models → **Unload model when idle** releases the transcription model after 1 to 60 minutes without a transcription (10 minutes by default, or Never). The next job reloads it in a few seconds. Speaker models are small and stay loaded.
-  - Kleio copies models already downloaded by Walkie on launch, so the first Parakeet or Whisper run needs no download. The selected model is used for meetings, imports, and watch folders.
+  - Kleio copies models already downloaded by Flo on launch, so the first Parakeet or Whisper run needs no download. The selected model is used for meetings, imports, and watch folders.
 - Timestamped transcript editing, search/replace, waveform seeking, playback speed, and meeting notes.
 - Export to TXT, Markdown, HTML, SRT, VTT, CSV, JSON, or the clipboard.
 - Optional Calendar integration and automatic call recording with a visible countdown. See [the auto-record plan](docs/auto-record-plan.md).

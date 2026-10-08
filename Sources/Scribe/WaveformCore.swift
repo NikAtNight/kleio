@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-// Adapted from Walkie's HudThemes.
+// Adapted from Flo's HudThemes.
 
 struct HudColor {
     var red: CGFloat
