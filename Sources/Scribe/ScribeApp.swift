@@ -172,7 +172,9 @@ struct ScribeApp: App {
     @StateObject private var callDetection = CallDetectionController()
 
     var body: some Scene {
-        WindowGroup("Kleio", id: "main") {
+        // A single-window scene, so openWindow(id: "main") brings the existing
+        // window forward instead of opening another one.
+        Window("Kleio", id: "main") {
             ContentView()
                 .environmentObject(library)
                 .environmentObject(modelManager)

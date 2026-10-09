@@ -368,7 +368,7 @@ struct AudioSettings: View {
 
 struct CallSettings: View {
     @EnvironmentObject private var callDetection: CallDetectionController
-    @AppStorage("manualAutoStopEnabled") private var manualAutoStopEnabled = false
+    @AppStorage("manualAutoStopEnabled") private var manualAutoStopEnabled = true
 
     var body: some View {
         Form {

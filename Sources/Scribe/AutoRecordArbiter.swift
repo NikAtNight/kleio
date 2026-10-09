@@ -506,7 +506,7 @@ final class AutoRecordArbiter: ObservableObject {
         )
         let manualCommands = manualAutoStopCore.update(
             now: now,
-            enabled: UserDefaults.standard.bool(forKey: "manualAutoStopEnabled"),
+            enabled: UserDefaults.standard.object(forKey: "manualAutoStopEnabled") as? Bool ?? true,
             recording: activeRecording,
             isPaused: recording.isPaused,
             elapsed: recording.elapsed,

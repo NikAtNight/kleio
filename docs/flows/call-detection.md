@@ -29,7 +29,7 @@ After a click, the controller rechecks presence and calls the explicit-video ove
 
 ## Ending recordings when the call ends
 
-With "End meeting recordings when the call ends" on, `AutoRecordArbiter` passes the recorded app's latest call read from `CallDetectionController.presence(for:)` to `ManualAutoStopCore`. Once that app has read as active during the recording, 15 seconds of `inactive` or `readyToJoin` reads stop it. An `unknown` read, a pause, or a read older than 6 seconds restarts the wait, so a call window on another Space never counts as ended. This needs call detection on and Accessibility access. The existing app-quit and silence rules still apply after two minutes.
+With "End meeting recordings when the call ends" on (the default since October 9, 2026), `AutoRecordArbiter` passes the recorded app's latest call read from `CallDetectionController.presence(for:)` to `ManualAutoStopCore`. Once that app has read as active during the recording, 15 seconds of `inactive` or `readyToJoin` reads stop it. An `unknown` read, a pause, or a read older than 6 seconds restarts the wait, so a call window on another Space never counts as ended. This needs call detection on and Accessibility access. The existing app-quit and silence rules still apply after two minutes.
 
 ## Read limits
 
