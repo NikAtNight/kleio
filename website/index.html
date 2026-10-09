@@ -3,209 +3,88 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kleio · Every call, on the record</title>
-<meta name="description" content="Kleio records Zoom, Teams, Slack, and browser calls and transcribes them on your Mac. No bots, no uploads.">
-<meta property="og:title" content="Kleio · Every call, on the record">
-<meta property="og:description" content="Record any call and transcribe it on your Mac. No bots, no uploads.">
+<title>Kleio · Every voice. Worth keeping.</title>
+<meta name="description" content="Kleio records you and the call, then writes it all down. Search the transcript, fix a speaker's name, or jump back to the moment it was said. No bots, no account.">
+<meta property="og:title" content="Kleio · Every voice. Worth keeping.">
+<meta property="og:description" content="The meeting recorder that takes the notes for you. No bots, no account.">
 <meta property="og:image" content="assets/kleio-icon.png">
-<meta name="theme-color" content="#0b2f66">
+<meta name="theme-color" content="#58b7ed">
 <link rel="icon" type="image/png" href="assets/favicon.png">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+<a class="skip-link" href="#top">Skip to content</a>
 
-<header class="site-header">
-  <div class="wrap header-inner">
-    <a class="brand" href="#top" aria-label="Kleio home">
-      <img src="assets/kleio-icon.png" alt="" width="32" height="32">
-      <span>Kleio</span>
-    </a>
-    <nav class="site-nav" aria-label="Sections">
-      <a href="#how">How it works</a>
-      <a href="#features">Features</a>
-      <a href="#privacy">Privacy</a>
-      <a href="#get">Get Kleio</a>
-    </nav>
-    <a class="button button-small button-ghost" href="https://github.com/NikAtNight/kleio">GitHub</a>
-  </div>
+<header class="header width">
+  <a class="brand" href="#top" aria-label="Kleio home">
+    <svg class="mark" viewBox="0 0 48 42" width="42" height="37" aria-hidden="true"><path d="M12 3h16a10 10 0 0 1 10 10v3a10 10 0 0 1-10 10h-8L9 34v-9A10 10 0 0 1 2 16v-3A10 10 0 0 1 12 3Z" fill="currentColor"/><path d="M30 15h6a10 10 0 0 1 10 10v3a10 10 0 0 1-8 10v3l-7-3h-6a10 10 0 0 1-10-10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 13h17M11 19h11" fill="none" stroke="var(--paper)" stroke-width="3" stroke-linecap="round"/></svg>
+    <span>kleio</span>
+  </a>
+  <nav aria-label="Main navigation">
+    <a href="#how">How it works</a>
+    <a href="#get">Get Kleio <span aria-hidden="true">↗</span></a>
+  </nav>
 </header>
 
 <main id="top">
 
-<section class="hero">
-  <div class="wrap hero-inner">
-    <div class="hero-copy">
-      <p class="eyebrow">Meeting recorder for Mac</p>
-      <h1>Every call, on the record.</h1>
-      <p class="lead">Kleio records Zoom, Teams, Slack, and browser calls, then transcribes them right on your Mac. No bots in the meeting. No uploads.</p>
-      <div class="hero-actions">
-        <a class="button button-ivory" href="#get">Get Kleio</a>
-        <a class="button button-ghost" href="https://github.com/NikAtNight/kleio">View on GitHub</a>
-      </div>
-      <p class="hero-note">macOS 15+ · Apple silicon</p>
-    </div>
+<section class="hero width" aria-labelledby="title">
+  <p class="intro">The meeting recorder that takes the notes for you.</p>
+  <h1 class="title" id="title"><span class="said">Every<br>voice.</span><span class="kept">Worth<br>keeping.</span></h1>
+  <div class="hero-bottom">
+    <p>Kleio records you and the call, then writes it all down. Stay in the conversation. The words will be waiting when you need them.</p>
+    <a class="button" href="#how">See how it works <span aria-hidden="true">↓</span></a>
+  </div>
+</section>
 
-    <figure class="mock" aria-label="Illustration of a Kleio transcript with speaker labels">
-      <div class="mock-bar">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-        <span class="mock-bar-title">Roadmap sync</span>
-      </div>
-      <div class="mock-body">
-        <div class="mock-head">
-          <div>
-            <p class="mock-title">Roadmap sync</p>
-            <p class="mock-meta">Zoom · Oct 1 · 38:12 · 4 people</p>
-          </div>
-          <div class="mock-tabs" aria-hidden="true">
-            <span>Summary</span><span class="is-on">Transcript</span><span>Notes</span>
-          </div>
-        </div>
-        <div class="mock-grid">
-          <ol class="turns">
-            <li>
-              <p class="turn-head"><b class="sp sp-you">You</b><time>02:14</time></p>
-              <p>Can we keep the import fix in this release? It's the one people keep running into.</p>
-            </li>
-            <li>
-              <p class="turn-head"><b class="sp sp-a">Priya</b><time>02:21</time></p>
-              <p>Yes, if the watch folder retry goes in too.</p>
-            </li>
-            <li class="is-review">
-              <p class="turn-head"><b class="sp sp-b">Speaker 3</b><span class="tag">Review</span><time>02:30</time></p>
-              <p>I can take that. Should be done by Thursday.</p>
-            </li>
-            <li>
-              <p class="turn-head"><b class="sp sp-c">Marcus</b><time>02:36</time></p>
-              <p>Then let's lock scope today.</p>
-            </li>
-          </ol>
-          <aside class="people" aria-hidden="true">
-            <p class="people-head">People</p>
-            <p><i class="sp-dot sp-you"></i>You<small>Microphone</small></p>
-            <p><i class="sp-dot sp-a"></i>Priya</p>
-            <p class="is-edit"><i class="sp-dot sp-b"></i>Speaker 3<small>Rename…</small></p>
-            <p><i class="sp-dot sp-c"></i>Marcus</p>
-          </aside>
-        </div>
-        <div class="player" aria-hidden="true">
-          <span class="play">▶</span><time>02:21</time><span class="wave"></span><time>38:12</time><span class="speed">1×</span>
-        </div>
-      </div>
+<section class="record" id="how">
+  <div class="record-inner width">
+    <div class="record-heading">
+      <h2>Two tracks.<br>One conversation.</h2>
+      <p>Your mic and the call each get their own track, so your words are always labeled as yours. Search the transcript, fix a speaker's name, or jump back to the moment it was said. Add notes, then export.</p>
+    </div>
+    <figure class="tracks" aria-label="Separate tracks for your microphone and the meeting app">
+      <div class="track your-track"><span>Your microphone</span><svg class="wave" viewBox="0 0 520 58" fill="none" aria-hidden="true"><use href="#wave"/></svg></div>
+      <div class="track their-track"><span>The meeting app</span><svg class="wave" viewBox="0 0 520 58" fill="none" aria-hidden="true"><use href="#wave"/></svg></div>
     </figure>
-  </div>
-</section>
-
-<section class="facts" aria-label="Quick facts">
-  <div class="wrap">
-  <div class="facts-inner">
-    <p><strong>5 seconds</strong><span>to transcribe an 11-minute call on an M5 Pro</span></p>
-    <p><strong>No bot</strong><span>joins your meeting</span></p>
-    <p><strong>No cloud</strong><span>needed to transcribe</span></p>
-  </div>
-  </div>
-</section>
-
-<section id="how" class="paper">
-  <div class="wrap">
-    <h2>Three steps. Zero setup per call.</h2>
-    <ol class="steps">
-      <li>
-        <span class="step-n">1</span>
-        <h3>Pick the app</h3>
-        <p>Zoom, Teams, Slack, or any browser.</p>
-      </li>
-      <li>
-        <span class="step-n">2</span>
-        <h3>Hit record</h3>
-        <p>Your mic and the call land on separate tracks.</p>
-      </li>
-      <li>
-        <span class="step-n">3</span>
-        <h3>Read it back</h3>
-        <p>Name a speaker once and every line updates.</p>
-      </li>
-    </ol>
-  </div>
-</section>
-
-<section id="features" class="paper paper-alt">
-  <div class="wrap">
-    <h2>Everything a meeting leaves behind</h2>
-    <div class="features">
-      <article>
-        <h3>Knows who said what</h3>
-        <p>Speakers sorted for you. Fix one with a click.</p>
-      </article>
-      <article>
-        <h3>Seriously fast</h3>
-        <p>Parakeet and Whisper models, running on your Mac.</p>
-      </article>
-      <article>
-        <h3>Screen, too</h3>
-        <p>Record any window, synced to the transcript.</p>
-      </article>
-      <article>
-        <h3>Summaries your way</h3>
-        <p>Apple Intelligence, Ollama, or your Claude or ChatGPT plan.</p>
-      </article>
-      <article>
-        <h3>Export anywhere</h3>
-        <p>Markdown, SRT, JSON, and more.</p>
-      </article>
-      <article>
-        <h3>Out of your way</h3>
-        <p>Lives in the menu bar. Keeps recording when you close the window.</p>
-      </article>
+    <div class="example">
+      <p class="example-label">Example conversation</p>
+      <blockquote class="quote first-quote"><cite>You <time>02:14</time></cite><p>"Let's keep the import fix in this release."</p></blockquote>
+      <blockquote class="quote second-quote"><cite>Priya <time>02:21</time></cite><p>"I'll take the watch folder retry."</p></blockquote>
     </div>
   </div>
 </section>
 
-<section id="privacy" class="privacy">
-  <div class="wrap narrow">
-    <h2>Your meetings stay yours.</h2>
-    <p class="lead">Recording, transcription, and speaker detection all happen on your Mac. Nothing leaves unless you turn on cloud summaries.</p>
-    <ul class="pills">
-      <li>No account</li>
-      <li>No bot</li>
-      <li>No upload</li>
-    </ul>
-  </div>
+<section class="private width" id="privacy">
+  <svg class="private-mark" viewBox="0 0 48 42" width="104" height="91" aria-hidden="true"><path d="M12 3h16a10 10 0 0 1 10 10v3a10 10 0 0 1-10 10h-8L9 34v-9A10 10 0 0 1 2 16v-3A10 10 0 0 1 12 3Z" fill="currentColor"/><path d="M30 15h6a10 10 0 0 1 10 10v3a10 10 0 0 1-8 10v3l-7-3h-6a10 10 0 0 1-10-10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 13h17M11 19h11" fill="none" stroke="var(--sky)" stroke-width="3" stroke-linecap="round"/></svg>
+  <h2>Your call.<br>Your copy.</h2>
+  <p>Recording, transcription, and speaker labels all happen on your own computer. No bot joins the meeting, and there's no account to make. Cloud summaries are optional and only send transcript text to the provider you pick.</p>
 </section>
 
-<section id="get" class="paper">
-  <div class="wrap narrow">
-    <h2>Try it today.</h2>
-    <p>Kleio is in early access, so for now you build it yourself. It's three commands on any Apple silicon Mac with Xcode.</p>
-    <div class="code">
-      <button class="copy" type="button" data-copy="code-build">Copy</button>
-<pre id="code-build"><code>git clone https://github.com/NikAtNight/kleio.git
-cd kleio
-./scripts/make-app.sh --install</code></pre>
+<section class="get" id="get">
+  <div class="get-inner width">
+    <h2>Keep the<br>next good talk.</h2>
+    <div>
+      <p>Kleio is in early access. Build it from source with Xcode on an Apple silicon Mac running macOS 15 or later.</p>
+      <a class="button build-button" href="https://github.com/dev-talix/kleio#build-and-verify">Get the source <span aria-hidden="true">↗</span></a>
     </div>
-    <a class="button button-ink" href="https://github.com/NikAtNight/kleio">Setup guide on GitHub</a>
   </div>
 </section>
 
 </main>
 
-<footer class="site-footer">
-  <div class="wrap footer-inner">
-    <p class="brand brand-footer"><img src="assets/kleio-icon.png" alt="" width="24" height="24"><span>Kleio</span></p>
-    <p>Named for the muse of history.</p>
-    <p><a href="https://github.com/NikAtNight/kleio">GitHub</a></p>
-  </div>
+<footer class="footer width">
+  <a class="brand" href="#top" aria-label="Kleio home">
+    <svg class="mark" viewBox="0 0 48 42" width="42" height="37" aria-hidden="true"><path d="M12 3h16a10 10 0 0 1 10 10v3a10 10 0 0 1-10 10h-8L9 34v-9A10 10 0 0 1 2 16v-3A10 10 0 0 1 12 3Z" fill="currentColor"/><path d="M30 15h6a10 10 0 0 1 10 10v3a10 10 0 0 1-8 10v3l-7-3h-6a10 10 0 0 1-10-10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 13h17M11 19h11" fill="none" stroke="var(--sky)" stroke-width="3" stroke-linecap="round"/></svg>
+    <span>kleio</span>
+  </a>
+  <a href="#privacy">Privacy</a>
+  <a href="https://github.com/dev-talix/kleio">Source on GitHub <span aria-hidden="true">↗</span></a>
 </footer>
 
-<script>
-document.querySelectorAll('[data-copy]').forEach(function (button) {
-  button.addEventListener('click', function () {
-    var text = document.getElementById(button.dataset.copy).innerText;
-    navigator.clipboard.writeText(text).then(function () {
-      button.textContent = 'Copied';
-      setTimeout(function () { button.textContent = 'Copy'; }, 1500);
-    });
-  });
-});
-</script>
+<!-- Shared waveform drawn once and reused by both tracks. -->
+<svg width="0" height="0" aria-hidden="true" style="position:absolute">
+  <path id="wave" d="M2 29h27m11-9v18m12-25v32m12-34v36m12-45v54m12-35v16m12-29v42m12-33v24m12-18v12m12-26v40m12-48v56m12-44v32m12-24v16m12-19v22m12-33v44m12-39v34m12-25v16m12-19v22m12-25v28m12-20v12m12-24v36m12-41v46m12-28v10m12-20v30m12-35v40m12-32v24m12-36v48m12-30v12m12-21v30m12-32v34m12-42v50m12-36v22m12-17v12m12-27v42m12-34v26m12-18v10m12-16v22m12-25v28m12-20v12m12-15v18m12-24v36m12-29v22m12-15v8m12-6h25" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+</svg>
 </body>
 </html>
