@@ -15,7 +15,7 @@ A native macOS meeting recorder that captures your microphone and the call on se
 
 Recording, transcription, and speaker detection run locally. Models need a one-time download. Summaries are optional, with local and cloud choices.
 
-**Early access.** Build from source on an Apple silicon Mac running macOS 15 or later. Kleio currently produces development builds; release packaging and real-call validation are still in progress.
+**[Download Kleio for Mac](https://github.com/dev-talix/kleio/releases/latest/download/Kleio.dmg)** for Apple silicon Macs running macOS 15 or later. It's signed and notarized, so it opens without Gatekeeper warnings. Real-call validation is still in progress.
 
 ## Recording and review
 
