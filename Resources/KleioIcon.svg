@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6cc4f2"/><stop offset="1" stop-color="#4aa9e3"/></linearGradient>
+    <filter id="lift" x="-10%" y="-10%" width="120%" height="125%"><feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity=".28"/></filter>
+  </defs>
+  <!-- macOS icon grid: an 824px tile centered on a 1024px canvas. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#lift)"/>
+  <g transform="translate(232 252) scale(11.67)">
+    <path d="M12 3h16a10 10 0 0 1 10 10v3a10 10 0 0 1-10 10h-8L9 34v-9A10 10 0 0 1 2 16v-3A10 10 0 0 1 12 3Z" fill="#102e55"/>
+    <path d="M30 15h6a10 10 0 0 1 10 10v3a10 10 0 0 1-8 10v3l-7-3h-6a10 10 0 0 1-10-10" fill="none" stroke="#102e55" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M11 13h17M11 19h11" fill="none" stroke="#fff4dd" stroke-width="3.2" stroke-linecap="round"/>
+  </g>
+</svg>

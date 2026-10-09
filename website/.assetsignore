@@ -2,6 +2,3 @@ README.md
 wrangler.jsonc
 .wrangler
 .DS_Store
-# Local design prototypes are never deployed.
-prototype-*
-assets/prototype-*
