@@ -44,7 +44,7 @@ swift package resolve
 open build/Kleio.app
 ```
 
-The packaging script builds the release executable, creates `build/Kleio.app`, and checks its signing, metadata, and resources. It uses the local development signing identity when available, or ad hoc signing otherwise. This is not a notarized release.
+The packaging script builds the release executable, creates `build/Kleio.app`, and checks its signing, metadata, and resources. It uses the local development signing identity when available, or ad hoc signing otherwise. This is not a notarized release. [Releasing Kleio](docs/releasing.md) covers the signed, notarized build.
 
 To run the automated tests:
 

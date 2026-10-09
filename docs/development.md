@@ -28,7 +28,7 @@ That script creates `build/Kleio.app`. Its `--install` option quits the existing
 
 The package records its version, build number, source revision, and whether the checkout was modified. `KLEIO_VERSION` and `KLEIO_BUILD_VERSION` can override the version numbers. `./scripts/verify-app.sh build/Kleio.app` checks signing, metadata, architecture, resources, and resource reads by the actual executable after relocation. It does not run a model or open the library.
 
-This is a development build. The generated Hub accessor still has a checkout fallback for GPT-2/T5 tokenizer defaults; the relocated resource check does not validate that accessor. Current Whisper models supply their own complete tokenizer configuration. Clean-Mac model execution, Developer ID signing, notarization, and an update channel remain release prerequisites.
+`make-app.sh` makes a development build. For a signed and notarized download, see [Releasing Kleio](releasing.md). The generated Hub accessor still has a checkout fallback for GPT-2/T5 tokenizer defaults; the relocated resource check does not validate that accessor. Current Whisper models supply their own complete tokenizer configuration. Clean-Mac model execution and an update channel are still open.
 
 Grant Microphone and System Audio Recording access when recording. Video uses the native screen-sharing picker and the corresponding macOS permission flow.
 

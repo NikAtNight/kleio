@@ -73,7 +73,14 @@ done
 SIGN_ID="Talix Dev Signing"
 AVAILABLE_IDENTITIES="$(security find-identity -v -p codesigning)"
 EXPECTED_SIGNER=""
-if /usr/bin/grep -Fq "\"$SIGN_ID\"" <<< "$AVAILABLE_IDENTITIES"; then
+if [ -n "${KLEIO_RELEASE_IDENTITY:-}" ]; then
+    # Set by scripts/release.sh: Developer ID, hardened runtime, and a secure timestamp for notarization.
+    [ "$SOURCE_TREE_STATE" = "clean" ] || { echo "Release builds need a clean checkout." >&2; exit 1; }
+    EXPECTED_SIGNER="$(awk -F'"' -v id="$KLEIO_RELEASE_IDENTITY" 'index($0, id) {print $2; exit}' <<< "$AVAILABLE_IDENTITIES")"
+    [ -n "$EXPECTED_SIGNER" ] || { echo "Signing identity $KLEIO_RELEASE_IDENTITY is unavailable." >&2; exit 1; }
+    codesign --force --sign "$KLEIO_RELEASE_IDENTITY" --identifier app.talix.scribe \
+        --options runtime --timestamp --entitlements Resources/Kleio.entitlements "$STAGED_APP"
+elif /usr/bin/grep -Fq "\"$SIGN_ID\"" <<< "$AVAILABLE_IDENTITIES"; then
     codesign --force --sign "$SIGN_ID" --identifier app.talix.scribe "$STAGED_APP"
     EXPECTED_SIGNER="$SIGN_ID"
 else
